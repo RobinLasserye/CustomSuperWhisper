@@ -1074,14 +1074,16 @@ class SuperWhisper(QObject):
             if mode != "disabled":
                 prompt = self._get_claude_prompt(mode)
                 if prompt:
+                    # Copy raw text to clipboard first as backup
+                    self._clipboard_copy(text)
+                    print("[SW] Raw text copied as backup", flush=True)
                     self.signals.reformulation_started.emit()
                     result, error = self._claude_reformat(text, prompt)
                     if error:
-                        # Claude failed: copy raw text but warn user
-                        self.signals.transcription_done.emit(text)
                         self.signals.warning.emit(error)
-                        return
-                    text = result
+                        return  # raw text already in clipboard
+                    self.signals.transcription_done.emit(result)
+                    return
             self.signals.transcription_done.emit(text)
         except Exception as e:
             import traceback
@@ -1136,15 +1138,13 @@ class SuperWhisper(QObject):
         self.tray.setIcon(self.icon_work)
         self.overlay.show_reformulating()
 
-    def _on_trans_done(self, text):
-        self.tray.setIcon(self.icon_idle)
-        # Kill previous wl-copy if still running (it stays alive to serve clipboard)
+    def _clipboard_copy(self, text):
+        """Copy text to clipboard via wl-copy (non-blocking)."""
         if hasattr(self, '_wl_copy_proc') and self._wl_copy_proc:
             try:
                 self._wl_copy_proc.kill()
             except OSError:
                 pass
-        # Start wl-copy — don't wait, it stays alive to serve clipboard on Wayland
         try:
             self._wl_copy_proc = subprocess.Popen(
                 ["wl-copy", "--", text],
@@ -1152,6 +1152,10 @@ class SuperWhisper(QObject):
             print(f"[SW] wl-copy started (pid={self._wl_copy_proc.pid})", flush=True)
         except Exception as e:
             print(f"[SW] wl-copy error: {e}", flush=True)
+
+    def _on_trans_done(self, text):
+        self.tray.setIcon(self.icon_idle)
+        self._clipboard_copy(text)
         # Show "Copié" immediately
         self.overlay.show_done()
         # Auto-paste in background (don't block UI)
