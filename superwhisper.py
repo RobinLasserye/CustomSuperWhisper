@@ -69,6 +69,56 @@ CLAUDE_BUILTIN_MODES = {
             "Renvoie UNIQUEMENT le message nettoyé, rien d'autre."
         ),
     },
+    "compact": {
+        "name": "Compact",
+        "prompt": (
+            "Tu reçois une transcription vocale brute. Transforme-la en un message compact et "
+            "synthétique, prêt à envoyer par message.\n\n"
+            "CE QUE TU DOIS FAIRE :\n"
+            "- Supprimer toutes les hésitations, répétitions, digressions et reformulations\n"
+            "- Synthétiser au maximum : aller droit au but, phrases courtes et percutantes\n"
+            "- Fusionner les idées redondantes en une seule formulation claire\n"
+            "- Corriger la grammaire et la ponctuation\n"
+            "- Garder le ton naturel et conversationnel\n"
+            "- Structurer avec des retours à la ligne si plusieurs points distincts\n\n"
+            "CE QUE TU NE DOIS PAS FAIRE :\n"
+            "- NE PAS perdre d'information clé ou d'idée importante\n"
+            "- NE PAS changer le sens du message\n"
+            "- NE PAS ajouter de contenu, de commentaire, de guillemets\n"
+            "- NE PAS transformer en liste à puces ou format formel\n\n"
+            "L'objectif est un message le plus court possible tout en conservant "
+            "TOUTES les informations et idées essentielles. "
+            "Renvoie UNIQUEMENT le message compact, rien d'autre."
+        ),
+    },
+    "dev": {
+        "name": "Développement",
+        "prompt": (
+            "Tu reçois une transcription vocale brute d'un développeur qui décrit une tâche, "
+            "un bug, ou une fonctionnalité à implémenter. Transforme cette transcription en une "
+            "instruction de développement structurée, précise et complète, optimisée pour être "
+            "exécutée par Claude Code (Opus 4.6) en mode agentique.\n\n"
+            "STRUCTURE DE L'INSTRUCTION GÉNÉRÉE :\n\n"
+            "1. **Objectif** : Résumer clairement ce qui doit être fait en 1-2 phrases\n\n"
+            "2. **Détails et contexte** : Reprendre TOUTES les informations techniques "
+            "mentionnées (fichiers, variables, composants, comportements observés, etc.)\n\n"
+            "3. **Exigences** : Lister précisément ce qui est attendu, point par point\n\n"
+            "4. **Contraintes** : Mentionner les contraintes évoquées "
+            "(compatibilité, performance, ne pas casser l'existant, etc.)\n\n"
+            "DIRECTIVES POUR CLAUDE CODE À INCLURE EN FIN D'INSTRUCTION :\n"
+            "- Explore d'abord le code existant en profondeur avant de modifier quoi que ce soit\n"
+            "- Sois rigoureux : vérifie chaque modification, teste les cas limites\n"
+            "- Après implémentation, relis ton propre code et vérifie qu'il n'y a pas de régression\n"
+            "- Si plusieurs approches sont possibles, choisis la plus simple et maintenable\n"
+            "- Ne fais que ce qui est demandé, pas de refactoring non sollicité\n\n"
+            "RÈGLES :\n"
+            "- NE PERDS aucune information technique mentionnée dans la transcription\n"
+            "- Reformule pour être clair et non ambigu, mais garde l'intention exacte du développeur\n"
+            "- Utilise le vocabulaire technique approprié\n"
+            "- N'invente rien qui n'a pas été dit\n"
+            "- Renvoie UNIQUEMENT l'instruction formatée, sans commentaire ni introduction"
+        ),
+    },
 }
 
 DEFAULT_CONFIG = {
