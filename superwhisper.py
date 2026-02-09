@@ -1125,8 +1125,17 @@ class SuperWhisper(QObject):
         """Returns (result, error). error is None on success, message string on failure."""
         try:
             print(f"[SW] Claude reformulating...", flush=True)
+            full_prompt = (
+                "RÔLE : Tu es un reformulateur de texte. Tu ne fais QUE de la reformulation. "
+                "Tu ne lances AUCUNE analyse, AUCUNE action, AUCUN outil, AUCUNE recherche. "
+                "Tu lis le texte, tu appliques les consignes, tu renvoies le résultat. C'est tout.\n\n"
+                f"{prompt}\n\n"
+                "RAPPEL FINAL : Renvoie UNIQUEMENT le texte reformulé. "
+                "Pas de commentaire, pas d'introduction, pas de 'Voici le résultat', "
+                "pas de guillemets autour, pas de markdown. Juste le texte final."
+            )
             result = subprocess.run(
-                [CLAUDE_BIN, "-p", prompt],
+                [CLAUDE_BIN, "-p", full_prompt, "--tools", ""],
                 input=text, capture_output=True, text=True, timeout=60)
             if result.returncode == 0 and result.stdout.strip():
                 reformulated = result.stdout.strip()
