@@ -440,6 +440,11 @@ class SettingsDialog(QDialog):
         self.btn_add_mode.clicked.connect(self._add_custom_mode)
         btn_row.addWidget(self.btn_add_mode)
 
+        self.btn_reset_prompt = QPushButton("Réinitialiser")
+        self.btn_reset_prompt.setObjectName("btn_delete")
+        self.btn_reset_prompt.clicked.connect(self._reset_prompt)
+        btn_row.addWidget(self.btn_reset_prompt)
+
         self.btn_del_mode = QPushButton("Supprimer")
         self.btn_del_mode.setObjectName("btn_delete")
         self.btn_del_mode.clicked.connect(self._del_custom_mode)
@@ -476,12 +481,19 @@ class SettingsDialog(QDialog):
             self.prompt_label.hide()
             self.prompt_edit.hide()
             self.btn_del_mode.hide()
+            self.btn_reset_prompt.hide()
         elif mode in CLAUDE_BUILTIN_MODES:
             self.prompt_label.show()
             self.prompt_edit.show()
-            self.prompt_edit.setPlainText(CLAUDE_BUILTIN_MODES[mode]["prompt"])
-            self.prompt_edit.setReadOnly(True)
+            self.prompt_edit.setReadOnly(False)
+            # Load override if exists, otherwise default
+            overrides = self.config.get("claude_prompt_overrides", {})
+            if mode in overrides:
+                self.prompt_edit.setPlainText(overrides[mode])
+            else:
+                self.prompt_edit.setPlainText(CLAUDE_BUILTIN_MODES[mode]["prompt"])
             self.btn_del_mode.hide()
+            self.btn_reset_prompt.show()
         elif mode and mode.startswith("custom:"):
             name = mode[len("custom:"):]
             self.prompt_label.show()
@@ -492,6 +504,7 @@ class SettingsDialog(QDialog):
                     self.prompt_edit.setPlainText(cm["prompt"])
                     break
             self.btn_del_mode.show()
+            self.btn_reset_prompt.hide()
 
     def _add_custom_mode(self):
         name, ok = QInputDialog.getText(
@@ -512,6 +525,14 @@ class SettingsDialog(QDialog):
                 self.claude_combo.setCurrentIndex(i)
                 break
         self._on_claude_mode_changed()
+
+    def _reset_prompt(self):
+        mode = self.claude_combo.currentData()
+        if mode in CLAUDE_BUILTIN_MODES:
+            self.prompt_edit.setPlainText(CLAUDE_BUILTIN_MODES[mode]["prompt"])
+            overrides = self.config.get("claude_prompt_overrides", {})
+            overrides.pop(mode, None)
+            self.config["claude_prompt_overrides"] = overrides
 
     def _del_custom_mode(self):
         mode = self.claude_combo.currentData()
@@ -534,8 +555,16 @@ class SettingsDialog(QDialog):
         # Save Claude mode
         mode = self.claude_combo.currentData()
         self.config["claude_mode"] = mode if mode else "disabled"
-        # Save custom mode prompt if editing one
-        if mode and mode.startswith("custom:"):
+        # Save prompt
+        if mode in CLAUDE_BUILTIN_MODES:
+            current_prompt = self.prompt_edit.toPlainText()
+            overrides = self.config.get("claude_prompt_overrides", {})
+            if current_prompt != CLAUDE_BUILTIN_MODES[mode]["prompt"]:
+                overrides[mode] = current_prompt
+            else:
+                overrides.pop(mode, None)
+            self.config["claude_prompt_overrides"] = overrides
+        elif mode and mode.startswith("custom:"):
             name = mode[len("custom:"):]
             for cm in self.config.get("claude_custom_modes", []):
                 if cm["name"] == name:
@@ -989,7 +1018,8 @@ class SuperWhisper(QObject):
 
     def _get_claude_prompt(self, mode):
         if mode in CLAUDE_BUILTIN_MODES:
-            return CLAUDE_BUILTIN_MODES[mode]["prompt"]
+            overrides = self.config.get("claude_prompt_overrides", {})
+            return overrides.get(mode, CLAUDE_BUILTIN_MODES[mode]["prompt"])
         if mode.startswith("custom:"):
             name = mode[len("custom:"):]
             for cm in self.config.get("claude_custom_modes", []):
