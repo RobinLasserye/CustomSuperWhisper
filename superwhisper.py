@@ -247,6 +247,7 @@ class Signals(QObject):
     transcription_started = Signal()
     reformulation_started = Signal()
     transcription_done = Signal(str)
+    warning = Signal(str)  # Claude failed, but raw text still copied
     error = Signal(str)
     audio_level = Signal(object)
 
@@ -895,6 +896,21 @@ class Overlay(QWidget):
         self._raise_timer.start(200)
         self._hide_timer.start(1000)
 
+    def show_warning(self, text):
+        """Warning: something failed but raw text was still copied."""
+        self._state = "idle"
+        self.label.setText(f"  {text}")
+        self.label.setStyleSheet("background: transparent; color: #fab387;")
+        self.container.setStyleSheet(
+            "background-color: rgba(17,17,27,230); border-radius:22px;"
+            "border: 1.5px solid rgba(250,179,135,50);")
+        self.spectrum.hide()
+        self.setFixedSize(480, 50)
+        self._center()
+        self.show()
+        self._raise_timer.start(200)
+        self._hide_timer.start(3000)
+
     def show_error(self, text):
         self._state = "idle"
         self.label.setText(f"  {text}")
@@ -952,6 +968,7 @@ class SuperWhisper(QObject):
         self.signals.transcription_started.connect(self._on_trans_start)
         self.signals.reformulation_started.connect(self._on_reform_start)
         self.signals.transcription_done.connect(self._on_trans_done)
+        self.signals.warning.connect(self._on_warning)
         self.signals.error.connect(self._on_error)
         self.signals.audio_level.connect(self._on_audio)
 
@@ -1058,7 +1075,13 @@ class SuperWhisper(QObject):
                 prompt = self._get_claude_prompt(mode)
                 if prompt:
                     self.signals.reformulation_started.emit()
-                    text = self._claude_reformat(text, prompt)
+                    result, error = self._claude_reformat(text, prompt)
+                    if error:
+                        # Claude failed: copy raw text but warn user
+                        self.signals.transcription_done.emit(text)
+                        self.signals.warning.emit(error)
+                        return
+                    text = result
             self.signals.transcription_done.emit(text)
         except Exception as e:
             import traceback
@@ -1078,21 +1101,28 @@ class SuperWhisper(QObject):
         return None
 
     def _claude_reformat(self, text, prompt):
+        """Returns (result, error). error is None on success, message string on failure."""
         try:
             print(f"[SW] Claude reformulating...", flush=True)
             result = subprocess.run(
                 [CLAUDE_BIN, "-p", prompt],
-                input=text, capture_output=True, text=True, timeout=30)
+                input=text, capture_output=True, text=True, timeout=60)
             if result.returncode == 0 and result.stdout.strip():
                 reformulated = result.stdout.strip()
                 print(f"[SW] Claude result: {reformulated[:80]}", flush=True)
-                return reformulated
-            print(f"[SW] Claude failed: rc={result.returncode} err={result.stderr.strip()[:100]}", flush=True)
+                return reformulated, None
+            err = result.stderr.strip()[:120] if result.stderr.strip() else f"code {result.returncode}"
+            print(f"[SW] Claude failed: {err}", flush=True)
+            return text, f"Claude échoué — texte brut copié ({err})"
         except subprocess.TimeoutExpired:
-            print("[SW] Claude timeout (30s)", flush=True)
+            print("[SW] Claude timeout (60s)", flush=True)
+            return text, "Claude timeout 60s — texte brut copié"
+        except FileNotFoundError:
+            print(f"[SW] Claude not found at {CLAUDE_BIN}", flush=True)
+            return text, f"Claude introuvable — texte brut copié"
         except Exception as e:
             print(f"[SW] Claude error: {e}", flush=True)
-        return text  # fallback to original transcription
+            return text, f"Claude erreur — texte brut copié"
 
     def _on_rec_start(self):
         self.tray.setIcon(self.icon_rec)
@@ -1126,6 +1156,10 @@ class SuperWhisper(QObject):
         self.overlay.show_done()
         # Auto-paste in background (don't block UI)
         threading.Thread(target=self._auto_paste, daemon=True).start()
+
+    def _on_warning(self, text):
+        self.tray.setIcon(self.icon_idle)
+        self.overlay.show_warning(text)
 
     def _on_error(self, text):
         self.tray.setIcon(self.icon_idle)
