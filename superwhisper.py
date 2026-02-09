@@ -25,7 +25,8 @@ import numpy as np
 from PySide6.QtWidgets import (
     QApplication, QWidget, QSystemTrayIcon, QMenu, QLabel, QVBoxLayout,
     QGraphicsOpacityEffect, QDialog, QComboBox, QPushButton,
-    QFormLayout, QGroupBox,
+    QFormLayout, QGroupBox, QPlainTextEdit, QHBoxLayout, QLineEdit,
+    QInputDialog,
 )
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QSize
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QAction
@@ -45,9 +46,28 @@ AVAILABLE_LANGUAGES = [
     ("Allemand", "de"), ("Italien", "it"), ("Portugais", "pt"),
     ("Japonais", "ja"), ("Chinois", "zh"), ("Auto-détection", None),
 ]
+
+CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
+CLAUDE_BUILTIN_MODES = {
+    "message": {
+        "name": "Message",
+        "prompt": (
+            "Tu reçois une transcription vocale brute. "
+            "Reformule-la en un message clair et naturel, prêt à être envoyé "
+            "(Facebook, SMS, Discord, etc.). "
+            "Corrige la grammaire, la ponctuation, supprime les hésitations et répétitions, "
+            "et reformule si nécessaire pour que ce soit fluide et naturel. "
+            "Ne rajoute rien, ne commente pas, ne mets pas de guillemets. "
+            "Renvoie uniquement le message reformulé, rien d'autre."
+        ),
+    },
+}
+
 DEFAULT_CONFIG = {
     "model": "large-v3", "language": "fr", "compute_type": "float16",
     "gpu_index": "1", "audio_device": "default",
+    "claude_mode": "disabled",
+    "claude_custom_modes": [],
 }
 
 
@@ -167,6 +187,7 @@ class Signals(QObject):
     recording_started = Signal()
     recording_stopped = Signal()
     transcription_started = Signal()
+    reformulation_started = Signal()
     transcription_done = Signal(str)
     error = Signal(str)
     audio_level = Signal(object)
@@ -298,7 +319,22 @@ class SettingsDialog(QDialog):
                 font-weight: bold; font-size: 14px;
             }
             QPushButton:hover { background: #b4d0fb; }
+            QPushButton#btn_delete { background: #45475a; color: #cdd6f4; padding: 8px 16px; }
+            QPushButton#btn_delete:hover { background: #585b70; }
+            QPushButton#btn_add { background: #45475a; color: #cdd6f4; padding: 8px 16px; }
+            QPushButton#btn_add:hover { background: #585b70; }
             QLabel { color: #a6adc8; }
+            QPlainTextEdit {
+                background: #1e1e2e; color: #cdd6f4; border: 1px solid #313244;
+                border-radius: 8px; padding: 8px; font-size: 12px;
+            }
+            QPlainTextEdit:focus { border-color: #89b4fa; }
+            QPlainTextEdit[readOnly="true"] { color: #a6adc8; }
+            QLineEdit {
+                background: #1e1e2e; color: #cdd6f4; border: 1px solid #313244;
+                border-radius: 8px; padding: 8px 14px; min-height: 30px;
+            }
+            QLineEdit:focus { border-color: #89b4fa; }
         """)
 
         layout = QVBoxLayout(self)
@@ -369,9 +405,117 @@ class SettingsDialog(QDialog):
         hl.addRow("Microphone :", self.audio_combo)
         layout.addWidget(hg)
 
+        # Claude post-processing
+        cg = QGroupBox("Post-traitement Claude")
+        cvl = QVBoxLayout(cg)
+        cvl.setSpacing(10)
+        cl = QFormLayout()
+        cl.setSpacing(10)
+
+        self.claude_combo = QComboBox()
+        self._rebuild_claude_combo()
+        self.claude_combo.currentIndexChanged.connect(self._on_claude_mode_changed)
+        cl.addRow("Mode :", self.claude_combo)
+        cvl.addLayout(cl)
+
+        self.prompt_label = QLabel("Prompt :")
+        self.prompt_label.setStyleSheet("color: #a6adc8; font-size: 12px;")
+        cvl.addWidget(self.prompt_label)
+
+        self.prompt_edit = QPlainTextEdit()
+        self.prompt_edit.setMaximumHeight(120)
+        cvl.addWidget(self.prompt_edit)
+
+        btn_row = QHBoxLayout()
+        self.btn_add_mode = QPushButton("+ Ajouter un mode")
+        self.btn_add_mode.setObjectName("btn_add")
+        self.btn_add_mode.clicked.connect(self._add_custom_mode)
+        btn_row.addWidget(self.btn_add_mode)
+
+        self.btn_del_mode = QPushButton("Supprimer")
+        self.btn_del_mode.setObjectName("btn_delete")
+        self.btn_del_mode.clicked.connect(self._del_custom_mode)
+        btn_row.addWidget(self.btn_del_mode)
+        btn_row.addStretch()
+        cvl.addLayout(btn_row)
+
+        layout.addWidget(cg)
+        self._on_claude_mode_changed()
+
         btn = QPushButton("Sauvegarder")
         btn.clicked.connect(self._save)
         layout.addWidget(btn)
+
+    def _rebuild_claude_combo(self):
+        self.claude_combo.blockSignals(True)
+        self.claude_combo.clear()
+        self.claude_combo.addItem("Désactivé", "disabled")
+        for mode_id, info in CLAUDE_BUILTIN_MODES.items():
+            self.claude_combo.addItem(info["name"], mode_id)
+        for cm in self.config.get("claude_custom_modes", []):
+            self.claude_combo.addItem(cm["name"], f"custom:{cm['name']}")
+        # Select current mode
+        current = self.config.get("claude_mode", "disabled")
+        for i in range(self.claude_combo.count()):
+            if self.claude_combo.itemData(i) == current:
+                self.claude_combo.setCurrentIndex(i)
+                break
+        self.claude_combo.blockSignals(False)
+
+    def _on_claude_mode_changed(self):
+        mode = self.claude_combo.currentData()
+        if mode == "disabled":
+            self.prompt_label.hide()
+            self.prompt_edit.hide()
+            self.btn_del_mode.hide()
+        elif mode in CLAUDE_BUILTIN_MODES:
+            self.prompt_label.show()
+            self.prompt_edit.show()
+            self.prompt_edit.setPlainText(CLAUDE_BUILTIN_MODES[mode]["prompt"])
+            self.prompt_edit.setReadOnly(True)
+            self.btn_del_mode.hide()
+        elif mode and mode.startswith("custom:"):
+            name = mode[len("custom:"):]
+            self.prompt_label.show()
+            self.prompt_edit.show()
+            self.prompt_edit.setReadOnly(False)
+            for cm in self.config.get("claude_custom_modes", []):
+                if cm["name"] == name:
+                    self.prompt_edit.setPlainText(cm["prompt"])
+                    break
+            self.btn_del_mode.show()
+
+    def _add_custom_mode(self):
+        name, ok = QInputDialog.getText(
+            self, "Nouveau mode", "Nom du mode :",
+            text="Mon mode")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        custom = self.config.get("claude_custom_modes", [])
+        if any(cm["name"] == name for cm in custom):
+            return
+        custom.append({"name": name, "prompt": ""})
+        self.config["claude_custom_modes"] = custom
+        self._rebuild_claude_combo()
+        # Select the new mode
+        for i in range(self.claude_combo.count()):
+            if self.claude_combo.itemData(i) == f"custom:{name}":
+                self.claude_combo.setCurrentIndex(i)
+                break
+        self._on_claude_mode_changed()
+
+    def _del_custom_mode(self):
+        mode = self.claude_combo.currentData()
+        if not mode or not mode.startswith("custom:"):
+            return
+        name = mode[len("custom:"):]
+        custom = self.config.get("claude_custom_modes", [])
+        self.config["claude_custom_modes"] = [
+            cm for cm in custom if cm["name"] != name]
+        self.config["claude_mode"] = "disabled"
+        self._rebuild_claude_combo()
+        self._on_claude_mode_changed()
 
     def _save(self):
         self.config["model"] = self.model_combo.currentData()
@@ -379,6 +523,16 @@ class SettingsDialog(QDialog):
         self.config["compute_type"] = self.compute_combo.currentData()
         self.config["gpu_index"] = self.gpu_combo.currentData()
         self.config["audio_device"] = self.audio_combo.currentData()
+        # Save Claude mode
+        mode = self.claude_combo.currentData()
+        self.config["claude_mode"] = mode if mode else "disabled"
+        # Save custom mode prompt if editing one
+        if mode and mode.startswith("custom:"):
+            name = mode[len("custom:"):]
+            for cm in self.config.get("claude_custom_modes", []):
+                if cm["name"] == name:
+                    cm["prompt"] = self.prompt_edit.toPlainText()
+                    break
         save_config(self.config)
         self.accept()
 
@@ -626,6 +780,19 @@ class Overlay(QWidget):
         self.show()
         self._raise_timer.start(200)
 
+    def show_reformulating(self):
+        self._state = "reformulating"
+        self.label.setText("  Reformulation Claude...")
+        self.label.setStyleSheet("background: transparent; color: #cba6f7;")
+        self.container.setStyleSheet(
+            "background-color: rgba(17,17,27,230); border-radius:22px;"
+            "border: 1.5px solid rgba(203,166,247,50);")
+        self.spectrum.hide()
+        self.setFixedSize(480, 50)
+        self._center()
+        self.show()
+        self._raise_timer.start(200)
+
     def show_done(self):
         """Brief confirmation then fade out."""
         self._state = "idle"
@@ -696,6 +863,7 @@ class SuperWhisper(QObject):
         self.signals.recording_started.connect(self._on_rec_start)
         self.signals.recording_stopped.connect(lambda: None)
         self.signals.transcription_started.connect(self._on_trans_start)
+        self.signals.reformulation_started.connect(self._on_reform_start)
         self.signals.transcription_done.connect(self._on_trans_done)
         self.signals.error.connect(self._on_error)
         self.signals.audio_level.connect(self._on_audio)
@@ -791,17 +959,52 @@ class SuperWhisper(QObject):
         try:
             print(f"[SW] Transcribing {len(audio)/SAMPLE_RATE:.1f}s audio...", flush=True)
             text = self.transcriber.transcribe(audio, self.config)
-            if text.strip():
-                print(f"[SW] Result: {text.strip()[:80]}", flush=True)
-                self.signals.transcription_done.emit(text.strip())
-            else:
+            if not text.strip():
                 print("[SW] No text detected", flush=True)
                 self.signals.error.emit("Aucun texte détecté")
+                return
+            text = text.strip()
+            print(f"[SW] Result: {text[:80]}", flush=True)
+            # Claude post-processing if enabled
+            mode = self.config.get("claude_mode", "disabled")
+            if mode != "disabled":
+                prompt = self._get_claude_prompt(mode)
+                if prompt:
+                    self.signals.reformulation_started.emit()
+                    text = self._claude_reformat(text, prompt)
+            self.signals.transcription_done.emit(text)
         except Exception as e:
             import traceback
             traceback.print_exc()
             print(f"[SW] Error: {e}", flush=True)
             self.signals.error.emit(f"Erreur: {e}")
+
+    def _get_claude_prompt(self, mode):
+        if mode in CLAUDE_BUILTIN_MODES:
+            return CLAUDE_BUILTIN_MODES[mode]["prompt"]
+        if mode.startswith("custom:"):
+            name = mode[len("custom:"):]
+            for cm in self.config.get("claude_custom_modes", []):
+                if cm["name"] == name:
+                    return cm["prompt"]
+        return None
+
+    def _claude_reformat(self, text, prompt):
+        try:
+            print(f"[SW] Claude reformulating...", flush=True)
+            result = subprocess.run(
+                [CLAUDE_BIN, "-p", prompt],
+                input=text, capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and result.stdout.strip():
+                reformulated = result.stdout.strip()
+                print(f"[SW] Claude result: {reformulated[:80]}", flush=True)
+                return reformulated
+            print(f"[SW] Claude failed: rc={result.returncode} err={result.stderr.strip()[:100]}", flush=True)
+        except subprocess.TimeoutExpired:
+            print("[SW] Claude timeout (30s)", flush=True)
+        except Exception as e:
+            print(f"[SW] Claude error: {e}", flush=True)
+        return text  # fallback to original transcription
 
     def _on_rec_start(self):
         self.tray.setIcon(self.icon_rec)
@@ -810,6 +1013,10 @@ class SuperWhisper(QObject):
     def _on_trans_start(self):
         self.tray.setIcon(self.icon_work)
         self.overlay.show_transcribing()
+
+    def _on_reform_start(self):
+        self.tray.setIcon(self.icon_work)
+        self.overlay.show_reformulating()
 
     def _on_trans_done(self, text):
         self.tray.setIcon(self.icon_idle)
