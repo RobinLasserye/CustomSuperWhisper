@@ -52,13 +52,21 @@ CLAUDE_BUILTIN_MODES = {
     "message": {
         "name": "Message",
         "prompt": (
-            "Tu reçois une transcription vocale brute. "
-            "Reformule-la en un message clair et naturel, prêt à être envoyé "
-            "(Facebook, SMS, Discord, etc.). "
-            "Corrige la grammaire, la ponctuation, supprime les hésitations et répétitions, "
-            "et reformule si nécessaire pour que ce soit fluide et naturel. "
-            "Ne rajoute rien, ne commente pas, ne mets pas de guillemets. "
-            "Renvoie uniquement le message reformulé, rien d'autre."
+            "Tu reçois une transcription vocale brute. Nettoie-la pour en faire un message "
+            "prêt à envoyer (Facebook, SMS, Discord, etc.).\n\n"
+            "CE QUE TU DOIS FAIRE :\n"
+            "- Supprimer les hésitations (euh, bah, genre, en fait répété, du coup répété)\n"
+            "- Corriger la grammaire et la ponctuation\n"
+            "- Ajouter des retours à la ligne pour aérer quand le message est long\n"
+            "- Supprimer les strictes répétitions (quand la même chose est dite deux fois de suite)\n"
+            "- Rendre les phrases fluides et naturelles\n\n"
+            "CE QUE TU NE DOIS PAS FAIRE :\n"
+            "- NE PAS résumer, NE PAS raccourcir, NE PAS supprimer des informations ou des idées\n"
+            "- NE PAS changer le sens ou le ton du message\n"
+            "- NE PAS ajouter de contenu, de commentaire, de guillemets\n"
+            "- NE PAS faire de résumé : CHAQUE idée et information du texte original doit être conservée\n\n"
+            "Le message nettoyé doit faire à peu près la même longueur que l'original. "
+            "Renvoie UNIQUEMENT le message nettoyé, rien d'autre."
         ),
     },
 }
