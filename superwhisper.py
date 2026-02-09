@@ -105,6 +105,24 @@ CLAUDE_BUILTIN_MODES = {
             "3. **Exigences** : Lister précisément ce qui est attendu, point par point\n\n"
             "4. **Contraintes** : Mentionner les contraintes évoquées "
             "(compatibilité, performance, ne pas casser l'existant, etc.)\n\n"
+            "5. **Stratégie d'exécution** : Selon la complexité de la tâche, ajouter la directive "
+            "appropriée parmi les suivantes :\n\n"
+            "   a) **Si la tâche implique du frontend/UI/design** (interfaces, pages web, "
+            "composants visuels, CSS, mise en page) : Ajouter l'instruction :\n"
+            '   "Utilise le skill /frontend-design pour générer des interfaces soignées et '
+            'production-ready. Invoque-le via l\'outil Skill avec skill: \"frontend-design\"."\n\n'
+            "   b) **Si la tâche est complexe, multi-fichiers, ou nécessite une grande rigueur** "
+            "(gros refactoring, feature touchant plusieurs modules, migration, "
+            "architecture) : Ajouter l'instruction :\n"
+            '   "Cette tâche nécessite le mode multi-agents. Utilise TeamCreate pour créer une équipe. '
+            "Organise l'équipe ainsi :\n"
+            "   - Un agent coordinateur (team lead) qui décompose le travail et assigne les tâches via TaskCreate\n"
+            "   - Un agent expert par sous-tâche technique (backend, frontend, DB, etc.) spawné via l'outil Task\n"
+            "   - Un agent qualité qui vérifie chaque livraison (tests, relecture, non-régression)\n"
+            "   Coordonne via SendMessage entre agents. Chaque agent marque ses tâches terminées "
+            'via TaskUpdate. L\'agent qualité valide avant de merger."\n\n'
+            "   c) **Si la tâche est simple** (bug fix, petit ajout, modification locale) : "
+            "Ne pas ajouter de stratégie multi-agents, rester en mode agent simple.\n\n"
             "DIRECTIVES POUR CLAUDE CODE À INCLURE EN FIN D'INSTRUCTION :\n"
             "- Explore d'abord le code existant en profondeur avant de modifier quoi que ce soit\n"
             "- Sois rigoureux : vérifie chaque modification, teste les cas limites\n"
@@ -116,6 +134,7 @@ CLAUDE_BUILTIN_MODES = {
             "- Reformule pour être clair et non ambigu, mais garde l'intention exacte du développeur\n"
             "- Utilise le vocabulaire technique approprié\n"
             "- N'invente rien qui n'a pas été dit\n"
+            "- CHOISIS la bonne stratégie (simple, frontend-design, ou multi-agents) selon le contexte\n"
             "- Renvoie UNIQUEMENT l'instruction formatée, sans commentaire ni introduction"
         ),
     },
