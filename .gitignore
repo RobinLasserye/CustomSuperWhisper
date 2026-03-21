@@ -2,3 +2,8 @@
 __pycache__/
 *.pyc
 *.egg-info/
+
+# Generated launchers (platform-specific, created by install.py)
+superwhisper.sh
+superwhisper.bat
+superwhisper.vbs
