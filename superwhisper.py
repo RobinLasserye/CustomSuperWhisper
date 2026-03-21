@@ -8,11 +8,19 @@ import platform
 IS_WINDOWS = platform.system() == "Windows"
 IS_LINUX = platform.system() == "Linux"
 
-# Ensure CUDA libraries are discoverable (Linux only)
-if IS_LINUX:
-    _venv = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    _pyver = f"python{sys.version_info.major}.{sys.version_info.minor}"
-    _site = os.path.join(_venv, ".venv", "lib", _pyver, "site-packages")
+# Ensure CUDA libraries are discoverable
+_site = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "Lib", "site-packages") if IS_WINDOWS else \
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "lib",
+                     f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages")
+if IS_WINDOWS:
+    _cuda_paths = [
+        os.path.join(_site, "nvidia", "cublas", "bin"),
+        os.path.join(_site, "nvidia", "cudnn", "bin"),
+    ]
+    _existing = [p for p in _cuda_paths if os.path.isdir(p)]
+    if _existing:
+        os.environ["PATH"] = ";".join(_existing) + ";" + os.environ.get("PATH", "")
+elif IS_LINUX:
     _cuda_paths = [
         os.path.join(_site, "nvidia", "cublas", "lib"),
         os.path.join(_site, "nvidia", "cudnn", "lib"),
@@ -174,18 +182,36 @@ DEFAULT_CONFIG = {
 def find_existing_instances():
     """Find PIDs of other superwhisper.py processes (not ourselves)."""
     my_pid = os.getpid()
+    my_ppid = os.getppid()
     pids = []
     if IS_WINDOWS:
         try:
+            # Get python processes whose commandline contains superwhisper.py
             out = subprocess.check_output(
                 ["wmic", "process", "where",
-                 "commandline like '%superwhisper.py%' and not processid=" + str(my_pid),
-                 "get", "processid"],
+                 "name like '%python%' and commandline like '%superwhisper.py%'",
+                 "get", "processid,commandline"],
                 text=True, stderr=subprocess.DEVNULL)
             for line in out.strip().split("\n")[1:]:
                 line = line.strip()
-                if line.isdigit():
-                    pids.append(int(line))
+                if not line:
+                    continue
+                # Extract PID (last token on the line)
+                parts = line.rsplit(None, 1)
+                if len(parts) < 2:
+                    continue
+                cmdline, pid_str = parts[0], parts[1]
+                if not pid_str.isdigit():
+                    continue
+                pid = int(pid_str)
+                # Skip ourselves and our parent
+                if pid in (my_pid, my_ppid):
+                    continue
+                # Only match processes running superwhisper.py as a script argument,
+                # not inline -c commands that happen to mention the filename
+                if ' -c ' in cmdline or ' -c"' in cmdline or " -c'" in cmdline:
+                    continue
+                pids.append(pid)
         except Exception:
             pass
     else:
