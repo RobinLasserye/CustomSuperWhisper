@@ -25,13 +25,15 @@ class DownloadSignals(QObject):
 
 
 class ModelsTab(QWidget):
-    """Onglet autonome : il lit la config pour connaître le GPU et le host Ollama, et écrit
-    `pending_apply` quand l'utilisateur veut appliquer une recommandation."""
+    """Onglet autonome : il lit la config pour connaître le GPU et le host Ollama, et appelle
+    `on_apply` pour pousser une configuration recommandée dans les widgets de la fenêtre."""
 
-    def __init__(self, config, parent=None):
+    def __init__(self, config, on_apply=None, parent=None):
         super().__init__(parent)
         self.config = config
-        self.pending_apply = None
+        # Appelé avec un dictionnaire de réglages : la fenêtre les pousse dans ses widgets, pour
+        # que ce qui est affiché soit toujours ce qui sera enregistré.
+        self.on_apply = on_apply
         self.signals = DownloadSignals()
         self.signals.progress.connect(self._on_progress)
         self.signals.finished.connect(self._on_finished)
@@ -67,7 +69,7 @@ class ModelsTab(QWidget):
         whisper_model, whisper_compute = tier["whisper"]
         llm = tier["llm"]
         total = models_catalog.total_vram_mib(whisper_model, whisper_compute, llm,
-                                             tier["num_ctx"])
+                                             tier["num_ctx"], tier["strategy"])
 
         if vram:
             headline = f"GPU {self.config.get('gpu_index', '0')} — {vram / 1024:.1f} Go de VRAM"
@@ -99,16 +101,22 @@ class ModelsTab(QWidget):
 
     def _apply_tier(self, tier):
         whisper_model, whisper_compute = tier["whisper"]
-        self.pending_apply = {
+        self._push({
             "model": whisper_model,
             "compute_type": whisper_compute,
             "ollama_model": tier["llm"],
             "ollama_num_ctx": tier["num_ctx"],
             "whisper_idle_unload_min": 5 if tier["strategy"] == "alternance" else 0,
-        }
+        })
         self.status.setText(
-            f"Configuration préparée : {whisper_model} / {whisper_compute} + {tier['llm']}. "
-            "Elle sera enregistrée en cliquant sur « Sauvegarder ».")
+            f"Configuration appliquée dans les onglets : {whisper_model} / {whisper_compute} + "
+            f"{tier['llm']}. Vérifie-la puis clique sur « Sauvegarder ».")
+
+    def _push(self, values):
+        if self.on_apply:
+            self.on_apply(values)
+        else:
+            self.config.update(values)
 
     # ─── Tableau Whisper ─────────────────────────────────────────────────────
 
@@ -268,8 +276,9 @@ class ModelsTab(QWidget):
         if not model:
             self.status.setText("Sélectionne d'abord une ligne dans le tableau.")
             return
-        self.pending_apply = dict(self.pending_apply or {}, ollama_model=model)
-        self.status.setText(f"{model} sera utilisé pour la reformulation après « Sauvegarder ».")
+        self._push({"ollama_model": model})
+        self.status.setText(
+            f"{model} sélectionné dans l'onglet Reformulation. Clique sur « Sauvegarder ».")
 
     # ─── Téléchargements ─────────────────────────────────────────────────────
 
@@ -285,9 +294,15 @@ class ModelsTab(QWidget):
         def run():
             try:
                 task()
-                self.signals.finished.emit(True, success_message)
+                ok, message = True, success_message
             except Exception as exc:
-                self.signals.finished.emit(False, f"Échec : {exc}")
+                ok, message = False, f"Échec : {exc}"
+            try:
+                self.signals.finished.emit(ok, message)
+            except RuntimeError:
+                # La fenêtre de réglages a été fermée pendant le téléchargement : le travail est
+                # terminé (Ollama garde le modèle), il n'y a simplement plus personne à prévenir.
+                pass
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -317,7 +332,7 @@ class ModelsTab(QWidget):
 
         host = self.config.get("ollama_host", "http://127.0.0.1:11434")
         try:
-            installed = set(models_catalog.ollama_installed_models(host))
+            installed = set(models_catalog.ollama_installed_models(host, timeout=1.5))
         except Exception:
             installed = None
         for row, model in self._llm_rows:

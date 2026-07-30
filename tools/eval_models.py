@@ -189,11 +189,29 @@ def installed_models():
 
 
 def normalize(text):
-    decomposed = unicodedata.normalize("NFD", (text or "").lower())
+    # L'apostrophe typographique est ramenée à l'apostrophe droite : sinon un interdit comme
+    # « t'arrange » ne se déclenche jamais sur un modèle qui écrit « t’arrange ».
+    text = (text or "").replace("\u2019", "'").replace("\u02bc", "'")
+    decomposed = unicodedata.normalize("NFD", text.lower())
     stripped = "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
     # « 1 025 » / « 1 025 » → « 1025 », pour ne pas pénaliser la typographie française
     stripped = re.sub(r"(?<=\d)[\s  ](?=\d)", "", stripped)
     return re.sub(r"\s+", " ", stripped)
+
+
+def contains(haystack, needle):
+    """Recherche bornée par des frontières de mot quand le motif est un mot ou un nombre.
+
+    Sans ça, « 60 » serait trouvé dans « 1608 » et un interdit court matcherait au milieu d'un mot
+    légitime : le test rendrait des verdicts faux dans les deux sens.
+    """
+    needle = normalize(needle)
+    if not needle:
+        return False
+    if re.fullmatch(r"[a-z0-9 ']+", needle):
+        pattern = r"(?<![a-z0-9])" + re.escape(needle).replace(r"\ ", " ") + r"(?![a-z0-9])"
+        return re.search(pattern, haystack) is not None
+    return needle in haystack
 
 
 def check(case, output):
@@ -201,10 +219,10 @@ def check(case, output):
     haystack = normalize(output)
     missing = []
     for group in case.get("requis", []):
-        if not any(normalize(variant) in haystack for variant in group):
+        if not any(contains(haystack, variant) for variant in group):
             missing.append(" / ".join(group))
     forbidden = [term for term in case.get("interdits", [])
-                 if normalize(term) in haystack]
+                 if contains(haystack, term)]
     language_ok = None
     if case.get("verifie_langue"):
         language_ok = langcheck.looks_like(output, case["verifie_langue"])
@@ -230,38 +248,51 @@ def run_case(model, case, think):
     return clean_output((data.get("message") or {}).get("content", "")), latency
 
 
-def evaluate(model, verbose=True):
+def evaluate(model, verbose=True, runs=1):
+    """Évalue un modèle. `runs > 1` répète chaque cas : la génération n'est pas déterministe même
+    à température 0,2, un score isolé varie de ±1 point."""
     think = "thinking" in capabilities(model)
-    results, score, total = [], 0.0, 0
+    results, score = [], 0.0
     for case in CASES:
-        total += 1
-        try:
-            output, latency = run_case(model, case, think)
-        except Exception as exc:
-            results.append({"cas": case["id"], "erreur": str(exc)})
-            if verbose:
-                print(f"    {case['id']:28s} ERREUR {exc}")
-            continue
+        reussites, details_par_run, latences = 0, [], []
+        for _ in range(runs):
+            try:
+                output, latency = run_case(model, case, think)
+            except Exception as exc:
+                details_par_run.append({"erreur": str(exc)})
+                continue
+            missing, forbidden, language_ok = check(case, output)
+            passed = not missing and not forbidden and language_ok is not False
+            reussites += 1 if passed else 0
+            latences.append(latency)
+            details_par_run.append({"reussi": passed, "manquants": missing,
+                                    "interdits": forbidden, "langue_ok": language_ok,
+                                    "latence_s": latency, "sortie": output})
 
-        missing, forbidden, language_ok = check(case, output)
-        passed = not missing and not forbidden and language_ok is not False
-        if passed:
-            score += 1
-        results.append({"cas": case["id"], "latence_s": latency, "reussi": passed,
-                        "manquants": missing, "interdits": forbidden,
-                        "langue_ok": language_ok, "sortie": output})
+        part = reussites / runs if runs else 0
+        score += part
+        latence = round(sum(latences) / len(latences), 2) if latences else None
+        results.append({"cas": case["id"], "reussites": reussites, "essais": runs,
+                        "latence_s": latence, "runs": details_par_run})
         if verbose:
-            mark = "OK  " if passed else "ÉCHEC"
-            print(f"    {case['id']:28s} {mark} {latency:5.2f}s", end="")
+            mark = "OK   " if reussites == runs else ("mixte" if reussites else "ÉCHEC")
+            compte = f"{reussites}/{runs}" if runs > 1 else ""
+            print(f"    {case['id']:28s} {mark} {compte:5s} "
+                  f"{latence if latence is not None else '?':>5}s", end="")
+            echecs = [d for d in details_par_run if not d.get("reussi")]
             details = []
-            if missing:
-                details.append("manque : " + ", ".join(missing))
-            if forbidden:
-                details.append("interdit : " + ", ".join(forbidden))
-            if language_ok is False:
-                details.append(f"pas en {case['verifie_langue']}")
+            for echec in echecs[:1]:
+                if echec.get("erreur"):
+                    details.append("erreur : " + echec["erreur"][:60])
+                if echec.get("manquants"):
+                    details.append("manque : " + ", ".join(echec["manquants"]))
+                if echec.get("interdits"):
+                    details.append("interdit : " + ", ".join(echec["interdits"]))
+                if echec.get("langue_ok") is False:
+                    details.append(f"pas en {case['verifie_langue']}")
             print(("  → " + " | ".join(details)) if details else "")
-    return {"model": model, "score": score, "total": total, "cases": results}
+    return {"model": model, "score": round(score, 2), "total": len(CASES), "runs": runs,
+            "cases": results}
 
 
 def main():
@@ -269,19 +300,22 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("models", nargs="*", help="modèles Ollama à évaluer")
     parser.add_argument("--json", help="fichier de sortie JSON")
+    parser.add_argument("--runs", type=int, default=1,
+                        help="répéter chaque cas (recommandé : 3, la génération varie)")
     parser.add_argument("--keep-loaded", action="store_true",
                         help="ne pas décharger le modèle après évaluation")
     args = parser.parse_args()
 
     models = args.models or installed_models()
-    print(f"Évaluation de {len(models)} modèle(s) sur {len(CASES)} cas de pièges\n")
+    print(f"Évaluation de {len(models)} modèle(s) sur {len(CASES)} cas de pièges"
+          f"{f', {args.runs} tirages par cas' if args.runs > 1 else ''}\n")
 
     report = []
     for model in models:
         print(f"=== {model}")
-        result = evaluate(model)
+        result = evaluate(model, runs=args.runs)
         report.append(result)
-        print(f"    → {result['score']:.0f}/{result['total']}\n")
+        print(f"    → {result['score']:.2f}/{result['total']}\n")
         if not args.keep_loaded:
             subprocess.run(["ollama", "stop", model], capture_output=True)
 
@@ -289,7 +323,7 @@ def main():
     for result in sorted(report, key=lambda r: -r["score"]):
         latencies = [c["latence_s"] for c in result["cases"] if c.get("latence_s")]
         median = sorted(latencies)[len(latencies) // 2] if latencies else 0
-        print(f"  {result['score']:.0f}/{result['total']}  {result['model']:24s} "
+        print(f"  {result['score']:5.2f}/{result['total']}  {result['model']:24s} "
               f"latence médiane {median:.2f}s")
 
     if args.json:

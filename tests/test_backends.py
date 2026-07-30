@@ -72,6 +72,14 @@ class FakeResponse:
         return False
 
 
+@pytest.fixture(autouse=True)
+def cache_propre():
+    """Le cache de capacités est partagé par tout le processus : chaque test repart à zéro."""
+    backends._CAPABILITIES_CACHE.clear()
+    yield
+    backends._CAPABILITIES_CACHE.clear()
+
+
 @pytest.fixture
 def ollama(monkeypatch):
     """Backend Ollama dont le transport est simulé ; `calls` reçoit les requêtes envoyées."""
@@ -122,6 +130,39 @@ def test_capabilities_sont_mises_en_cache(ollama):
     backend.capabilities()
     backend.capabilities()
     assert len([c for c in calls if c["url"].endswith("/api/show")]) == 1
+
+
+def test_le_cache_de_capacites_est_partage_entre_instances(ollama):
+    backend, calls = ollama
+    backend.capabilities()
+    autre = backends.OllamaBackend(model="modele-test")
+    assert autre.capabilities() == ["completion", "thinking"]
+    assert len([c for c in calls if c["url"].endswith("/api/show")]) == 1
+
+
+def test_api_show_injoignable_retombe_sur_le_catalogue(monkeypatch):
+    """Sans réponse d'Ollama, conclure « pas de raisonnement » laisserait le mode réflexion actif
+    et livrerait un texte précédé du raisonnement du modèle."""
+    def refuse(*_args, **_kwargs):
+        raise urllib.error.URLError("down")
+
+    monkeypatch.setattr(backends.urllib.request, "urlopen", refuse)
+    connu = backends.OllamaBackend(model="qwen3:8b")          # présent au catalogue, thinking=True
+    assert connu.supports_thinking() is True
+    inconnu = backends.OllamaBackend(model="modele-jamais-vu")
+    assert inconnu.supports_thinking() is False
+
+
+def test_hote_sans_schema_est_normalise():
+    assert backends.OllamaBackend(host="127.0.0.1:11434").host == "http://127.0.0.1:11434"
+    assert backends.OllamaBackend(host="").host == "http://127.0.0.1:11434"
+    assert backends.OllamaBackend(host="http://ailleurs:1234/").host == "http://ailleurs:1234"
+
+
+def test_list_models_survit_a_une_forme_inattendue(monkeypatch):
+    monkeypatch.setattr(backends.urllib.request, "urlopen",
+                        lambda *a, **k: FakeResponse({"modeles": "surprise"}))
+    assert backends.OllamaBackend().list_models() == []
 
 
 def test_ollama_eteint_donne_un_message_lisible(monkeypatch):
@@ -257,3 +298,21 @@ def test_compare_les_langues_latines_au_francais():
 def test_texte_trop_court_est_indetermine():
     assert langcheck.looks_like("Salut", "en") is None
     assert langcheck.looks_like("", "en") is None
+
+
+# ─── Régressions trouvées en revue ────────────────────────────────────────────
+
+def test_une_premiere_ligne_legitime_commencant_par_voici_est_conservee():
+    texte = "Voici les chiffres du trimestre :\n- ventes en hausse de 12 %"
+    assert backends.clean_output(texte) == texte
+
+
+def test_le_preambule_reste_retire():
+    for preambule in ("Voici le message nettoyé :", "Voici la traduction :",
+                      "Here is the message:"):
+        assert backends.clean_output(f"{preambule}\nSalut, ça va ?") == "Salut, ça va ?"
+
+
+def test_une_reponse_encadree_de_deux_vrais_blocs_de_code_est_preservee():
+    texte = "```bash\navant\n```\nmilieu\n```bash\napres\n```"
+    assert backends.clean_output(texte) == texte

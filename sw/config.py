@@ -68,19 +68,46 @@ def needs_migration(raw):
     return any(key in raw for key in LEGACY_KEYS)
 
 
+def _merge_legacy(current, legacy):
+    """Fusionne une valeur héritée avec la valeur déjà présente sous le nouveau nom.
+
+    La valeur nouvelle gagne, mais **clé par clé** : une nouvelle clé vide ne doit pas jeter les
+    consignes écrites à la main sous l'ancien nom. C'est le cas qui se produit quand une version
+    précédente de l'application réécrit le fichier alors que le nouveau schéma existe déjà.
+    """
+    if isinstance(current, dict) and isinstance(legacy, dict):
+        merged = dict(legacy)
+        merged.update(current)
+        return merged
+    if isinstance(current, list) and isinstance(legacy, list):
+        if not current:
+            return list(legacy)
+        known = {item.get("name") for item in current if isinstance(item, dict)}
+        extra = [item for item in legacy
+                 if not (isinstance(item, dict) and item.get("name") in known)]
+        return current + extra
+    if current in (None, "", {}, []):
+        return legacy
+    return current
+
+
 def migrate(raw):
     """Convertit une config d'une version précédente. Ne perd aucun prompt personnalisé."""
-    config = dict(raw)
+    config = copy.deepcopy(raw)
     for old_key, new_key in LEGACY_KEYS.items():
-        if old_key in config:
-            value = config.pop(old_key)
-            # Une valeur déjà présente sous le nouveau nom est prioritaire
-            config.setdefault(new_key, value)
+        if old_key not in config:
+            continue
+        legacy = config.pop(old_key)
+        if new_key in config:
+            config[new_key] = _merge_legacy(config[new_key], legacy)
+        else:
+            config[new_key] = legacy
 
     # Les modes personnalisés passaient tous par Claude ; ils basculent sur le backend par défaut
     # mais gardent leur prompt.
     for custom in config.get("reformat_custom_modes", []) or []:
-        custom.setdefault("backend", "ollama")
+        if isinstance(custom, dict):
+            custom.setdefault("backend", "ollama")
 
     return config
 
@@ -106,9 +133,21 @@ def load_config(path=CONFIG_PATH):
 
 
 def save_config(config, path=CONFIG_PATH):
+    """Écriture atomique : le fichier existant n'est remplacé qu'une fois le nouveau complet.
+
+    Un `open(path, "w")` tronque immédiatement le fichier ; une erreur de sérialisation ou une
+    coupure en cours d'écriture laisserait alors une config amputée — donc les consignes écrites à
+    la main perdues, silencieusement. On sérialise d'abord en mémoire, on écrit à côté, puis on
+    remplace.
+    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(config, handle, indent=2, ensure_ascii=False)
+    payload = json.dumps(config, indent=2, ensure_ascii=False)
+    temporary = f"{path}.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
 
 
 def migrate_file(path=CONFIG_PATH):
@@ -126,12 +165,23 @@ def migrate_file(path=CONFIG_PATH):
     if not needs_migration(raw):
         return None
 
-    backup = f"{path}.bak-{time.strftime('%Y%m%d-%H%M%S')}"
-    try:
-        with open(backup, "w", encoding="utf-8") as handle:
-            json.dump(raw, handle, indent=2, ensure_ascii=False)
-    except OSError as exc:
-        log(f"sauvegarde de la config impossible ({exc}) — migration annulée")
+    payload = json.dumps(raw, indent=2, ensure_ascii=False)
+    backup = None
+    for candidate in (f"{path}.bak-{time.strftime('%Y%m%d-%H%M%S')}", f"{path}.bak"):
+        try:
+            with open(candidate, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+            backup = candidate
+            break
+        except OSError as exc:
+            log(f"sauvegarde impossible dans {candidate} ({exc})")
+
+    if backup is None:
+        # Sans copie de secours on ne réécrit pas le fichier. La config est tout de même migrée en
+        # mémoire par load_config, donc on prévient bruyamment : le prochain enregistrement
+        # convertira le fichier sans filet.
+        log("ATTENTION : aucune sauvegarde n'a pu être créée, le fichier n'est pas converti — "
+            "vérifie les droits sur le dossier de configuration")
         return None
 
     save_config(apply_defaults(migrate(raw)), path)

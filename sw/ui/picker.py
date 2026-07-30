@@ -85,8 +85,9 @@ class PresetPicker(QDialog):
             row.addWidget(self.language_combo, 1)
             layout.addLayout(row)
 
-        hint = QLabel("1-9 choisir · ↑↓ naviguer · ←→ changer de langue · "
-                      "Entrée appliquer · Échap texte brut")
+        digits = min(len(modes), 9)
+        hint = QLabel(f"1-{digits} choisir directement · ↑↓ pour les suivants · "
+                      "←→ changer de langue · Entrée appliquer · Échap texte brut")
         hint.setObjectName("hint")
         layout.addWidget(hint)
 

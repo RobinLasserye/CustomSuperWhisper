@@ -26,16 +26,18 @@ sous-processus isolé pour que la mesure de VRAM ne soit pas polluée par la pr�
 | tiny | float16 | 0,66 Go | 0,4 s | 32× | 0,965 | 0,770 |
 | base | float16 | 0,75 Go | 0,4 s | 23× | 0,867 | 0,714 |
 | small | int8 | 0,84 Go | 0,7 s | 26× | 0,573 | 0,509 |
-| small | float16 | 1,19 Go | 0,5 s | 35× | 0,646 | 0,537 |
-| distil-large-v3 | int8 | 1,50 Go | 1,3 s | 61× | 0,927 | 0,913 |
-| **large-v3-turbo** | **int8** | **1,59 Go** | 1,5 s | **55×** | 0,354 | **0,268** |
+| small | float16 | 1,19 Go | 0,5 s | 34× | 0,646 | 0,537 |
+| distil-large-v3 | int8 | 1,50 Go | 1,3 s | 62× | 0,927 | 0,913 |
+| **large-v3-turbo** | **int8** | **1,59 Go** | 1,5 s | **56×** | 0,354 | **0,268** |
 | large-v3 | int8 | 2,34 Go | 2,3 s | 23× | 0,361 | **0,243** |
 | medium | float16 | 2,41 Go | 0,8 s | 22× | 0,470 | 0,338 |
 | distil-large-v3 | float16 | 2,44 Go | 0,9 s | 59× | 0,928 | 0,917 |
-| large-v3-turbo | float16 | 2,56 Go | 1,0 s | 55× | 0,440 | 0,298 |
+| large-v3-turbo | float16 | 2,56 Go | 1,0 s | 56× | 0,440 | 0,298 |
 | large-v3 | float16 | 4,19 Go | 1,3 s | 24× | 0,370 | 0,251 |
 
-« Vitesse » = facteur temps réel (55× signifie qu'une minute d'audio est transcrite en 1,1 s).
+« Vitesse » = facteur temps réel, soit `1 / RTF` arrondi (56× signifie qu'une minute d'audio est
+transcrite en 1,1 s). « Go » désigne ici des Gio : les mesures brutes sont en Mio, divisées par
+1024.
 
 **Lecture importante.** Les clips sont synthétisés avec `espeak-ng`, ce qui donne une vérité
 terrain exacte mais une voix hors distribution : les WER absolus sont bien plus mauvais que sur une
@@ -46,7 +48,7 @@ Trois conclusions actionnables :
 
 - **`distil-large-v3` est inutilisable en français** (WER 0,91 contre 0,25). C'est un modèle
   anglais uniquement — il est étiqueté comme tel dans l'interface.
-- **`large-v3-turbo` en int8 est le meilleur rapport qualité/VRAM** : 1,6 Go, 55× temps réel, et
+- **`large-v3-turbo` en int8 est le meilleur rapport qualité/VRAM** : 1,6 Go, 56× temps réel, et
   un WER (0,268) à deux points de `large-v3` en float16 (0,251) qui coûte 2,6× plus de VRAM et
   transcrit 2,3× moins vite.
 - **int8 n'est pas un compromis dégradant** ici : `large-v3` en int8 obtient le meilleur WER de
@@ -144,14 +146,20 @@ Les fautes ci-dessus sont devenues un test reproductible : `tools/eval_models.py
 piégées et vérifie automatiquement la présence de ce qui doit survivre et l'absence de ce qui
 trahit une invention. C'est l'outil à relancer avant d'adopter un nouveau modèle.
 
+Scores moyennés sur **3 tirages par cas** (la génération n'est pas déterministe, même à
+température 0,2 : un tirage unique varie de ±1 point — mesuré sur qwen3:8b, 7/9 puis 6/9).
+
 | Modèle | Score | Échecs restants |
 |---|---:|---|
-| **qwen3:8b** | **7/9** | « un giga six » perdu à la traduction (2 cas) |
-| qwen3.5:2b | 5/9 | perd `little endian` et `SteamVR` ; ne traduit pas en japonais |
-| qwen3:1.7b | 5/9 | perd les montants 340/280 ; perd `08 02` |
-| qwen3.5:4b | 4/9 | invente `[votre nom]` ; « recette » → « réception » ; japonais rendu en français |
-| gemma3:4b-it-qat | 4/9 | invente `Ctrl+Alt+E` ; perd `int8` et `1,6 Go` |
-| granite4:micro | 2/9 | perd « jeudi »/« vendredi », invente « rendez-vous », perd « lot deux » |
+| **qwen3:8b** | **6,67/9** | « un giga six » perdu (0/3) ; « overlay » oublié (2/3) |
+| **qwen3:1.7b** | **6,00/9** | identifiants techniques denses (0/3) ; pas de japonais (0/3) |
+| qwen3.5:4b | 5,33/9 | « un giga six » (0/3) ; « recette » → « réception » (2/3) ; japonais rendu en français (0/3) |
+| gemma3:4b-it-qat | 4,33/9 | invente `Ctrl+Alt+E` (0/3) ; perd `int8` et `1,6 Go` (0/3) |
+| qwen3.5:2b | 4,00/9 | perd les montants 340/280 (0/3) ; identifiants (2/3) |
+| granite4:micro | 2,00/9 | perd « jeudi »/« vendredi », le « lot deux », les montants |
+
+Le résultat contre-intuitif du lot : **qwen3:1.7b (2,0 Go) est plus fiable que qwen3.5:2b
+(4,3 Go)** et que gemma3:4b (6,0 Go). La taille ne prédit pas la fidélité.
 
 ```
 $ python tools/eval_models.py qwen3:8b
@@ -181,6 +189,7 @@ des 60 sujets.
 | Modèle | 281 mots | 832 mots | 1664 mots | Montants conservés | Sujets conservés |
 |---|---:|---:|---:|---:|---:|
 | **qwen3:8b** | 3,13 s | 7,47 s | 14,27 s | **60/60** | **60/60** |
+
 | qwen3.5:4b | 2,99 s | 4,90 s | 11,89 s | 60/60 | 60/60 |
 | granite4:micro | 4,90 s | 2,56 s | 5,34 s | 60/60 | 60/60 |
 | gemma3:4b-it-qat | 3,23 s | 3,56 s | 5,83 s | 60/60 | 60/60 |
@@ -214,10 +223,15 @@ perçu entre le relâchement du raccourci et le texte collé.
 **Étage 2 — reformulation `qwen3:8b`** (mesuré, contenu unique) : 0,19 s pour 18 mots, 0,39 s pour
 53 mots, 3,13 s pour 281 mots, 7,47 s pour 832 mots, 14,27 s pour 1664 mots.
 
-**Total, configuration par défaut** (`large-v3` float16 + `qwen3:8b`) : environ **0,4 s** pour une
-phrase, **1 s** pour un paragraphe court, **5 s** pour 280 mots, **19 s** pour 500 mots et **29 s**
-pour une dictée de quatre minutes. Avec `large-v3-turbo` en int8 à la place, le même palier de
-quatre minutes tombe à **17 s** : la transcription passe de 14,7 s à 2,3 s.
+**Total** (`large-v3` float16 + `qwen3:8b`, reformulation activée) : les deux étages n'ayant pas
+été mesurés aux mêmes points, voici les seuls totaux qui additionnent des mesures comparables —
+**0,4 s** pour une phrase (18 mots), **0,9 s** pour trois lignes (53 mots), et de l'ordre de
+**25 à 30 s** pour une dictée de quatre minutes (14,7 s de transcription + 7,5 à 14,3 s de
+reformulation selon que la dictée fait 830 ou 1660 mots).
+
+Avec `large-v3-turbo` en int8 à la place, ce dernier palier tombe autour de **10 à 17 s** : la
+transcription passe de 14,7 s à 2,3 s. À noter que la configuration livrée par défaut a la
+reformulation **désactivée** : sans elle, seul l'étage 1 compte.
 
 La transcription domine sur les dictées longues avec `large-v3`, ce qui rend `large-v3-turbo` en
 int8 intéressant même sur une grosse carte.
@@ -228,11 +242,11 @@ Ces paliers sont ceux que l'onglet **Modèles** applique en un clic, après dét
 
 | VRAM | Transcription | Reformulation | Contexte | Total | Cohabitation |
 |---|---|---|---:|---:|---|
-| 4 Go | large-v3-turbo int8 | qwen3:1.7b | 2048 | 3,5 Go | non — décharger Whisper après 5 min |
+| 4 Go | large-v3-turbo int8 | qwen3:1.7b | 2048 | 1,9 Go en alternance | non — décharger Whisper après 5 min |
 | 6 Go | large-v3-turbo int8 | qwen3:1.7b | 8192 | 4,3 Go | oui |
-| 8 Go | large-v3-turbo int8 | qwen3.5:2b | 8192 | 5,9 Go | oui |
+| 8 Go | large-v3 int8 | qwen3:1.7b | 8192 | 5,1 Go | oui |
 | 12 Go | large-v3 int8 | qwen3:8b | 8192 | 8,8 Go | oui |
-| 16 Go et + | large-v3 float16 | qwen3:8b | 8192 | 10,7 Go | oui |
+| 16 Go et + | large-v3 int8 | qwen3:8b | 8192 | 8,8 Go | oui |
 
 Deux réglages servent les petites cartes :
 
@@ -241,9 +255,9 @@ Deux réglages servent les petites cartes :
 - **`keep_alive`** côté Ollama fait la même chose pour le modèle de reformulation. `0` le décharge
   immédiatement, `30m` (défaut) le garde chaud une demi-heure.
 
-Sous 6 Go, le modèle de reformulation disponible (`qwen3:1.7b`) perd des chiffres sur les dictées
-longues : il est honnête de s'en servir pour des messages courts et de désactiver la reformulation
-pour les dictées techniques.
+`qwen3:1.7b` échoue surtout sur les dictées denses en identifiants techniques (`2AD9`,
+`little endian`, `SteamVR`) et ne traduit pas en japonais : sur une petite carte, il est honnête de
+relire les dictées techniques, ou de désactiver la reformulation pour celles-là.
 
 ## Reproduire
 

@@ -10,19 +10,38 @@ import subprocess
 import urllib.error
 import urllib.request
 
-from . import langcheck
+from . import langcheck, models_catalog
 from .runtime import CLAUDE_BIN, log
+
+# Capacités partagées entre instances : un nouveau backend est construit à chaque dictée, sans ce
+# cache /api/show serait interrogé chaque fois.
+_CAPABILITIES_CACHE = {}
 
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _FENCE = re.compile(r"^```[a-zA-Z0-9_+-]*\s*\n(.*)\n```$", re.DOTALL)
+_FENCE_LINE = re.compile(r"^```", re.MULTILINE)
+# Volontairement étroit : « Voici les chiffres du trimestre : » est un contenu légitime, seule
+# une annonce du résultat lui-même doit disparaître.
 _PREAMBLE_LINE = re.compile(
-    r"^(voici|voilà|here is|here's|résultat|resultat|texte reformulé|message nettoyé)\b[^\n]{0,80}:\s*\n",
+    r"^(voici|voilà|here is|here's)\s+(le|la|les|the|your|ton|votre)?\s*"
+    r"(texte|message|résultat|resultat|result|ticket|mail|e-mail|email|note|notes|traduction|"
+    r"translation|version)[^\n]{0,40}:\s*\n+",
     re.IGNORECASE)
 _QUOTE_PAIRS = (("«", "»"), ('"', '"'), ("“", "”"), ("'", "'"), ("‘", "’"))
 
 
 class ReformatError(Exception):
     """Erreur de reformulation, avec un message affichable tel quel."""
+
+
+def _normalize_host(host):
+    """« 127.0.0.1:11434 » saisi sans schéma reste utilisable."""
+    host = (host or "").strip().rstrip("/")
+    if not host:
+        return "http://127.0.0.1:11434"
+    if "://" not in host:
+        host = "http://" + host
+    return host
 
 
 def clean_output(text):
@@ -40,10 +59,13 @@ def clean_output(text):
 
     text = text.strip()
 
-    # Bloc de code enveloppant la totalité de la réponse (mais pas les blocs internes légitimes)
-    match = _FENCE.match(text)
-    if match:
-        text = match.group(1).strip()
+    # Bloc de code enveloppant la totalité de la réponse. On ne le retire que s'il n'y a
+    # exactement que ces deux délimiteurs : un ticket qui commence et finit par un vrai bloc de
+    # code en contient davantage, et le découper le mutilerait.
+    if len(_FENCE_LINE.findall(text)) == 2:
+        match = _FENCE.match(text)
+        if match:
+            text = match.group(1).strip()
 
     # Ligne de préambule (« Voici le message nettoyé : »)
     text = _PREAMBLE_LINE.sub("", text, count=1).strip()
@@ -69,7 +91,7 @@ class OllamaBackend:
 
     def __init__(self, host="http://127.0.0.1:11434", model="qwen3.5:4b", keep_alive="30m",
                  timeout=60, num_ctx=8192, temperature=0.2):
-        self.host = (host or "http://127.0.0.1:11434").rstrip("/")
+        self.host = _normalize_host(host)
         self.model = model
         self.keep_alive = keep_alive
         self.timeout = timeout
@@ -101,31 +123,45 @@ class OllamaBackend:
 
     # — État —
 
+    # Les sondes appelées depuis l'interface ont un délai court : la fenêtre de réglages ne doit
+    # pas geler plusieurs secondes quand l'hôte configuré ne répond pas.
+    UI_TIMEOUT = 1.5
+
     def list_models(self):
         try:
-            data = self._get("/api/tags")
-        except (urllib.error.URLError, OSError, ValueError):
-            return []
-        return sorted(entry["name"] for entry in data.get("models", []))
+            data = self._get("/api/tags", timeout=self.UI_TIMEOUT)
+            return sorted(str(entry["name"]) for entry in data["models"])
+        except Exception:
+            return []                     # forme inattendue comprise : la fenêtre doit s'ouvrir
 
     def is_running(self):
         try:
-            self._get("/api/tags")
+            self._get("/api/tags", timeout=self.UI_TIMEOUT)
             return True
-        except (urllib.error.URLError, OSError, ValueError):
+        except Exception:
             return False
 
     def capabilities(self, model=None):
-        """Capacités annoncées par Ollama. Résultat mis en cache par modèle."""
+        """Capacités annoncées par Ollama, mises en cache pour tout le processus."""
         model = model or self.model
-        if model in self._capabilities:
-            return self._capabilities[model]
+        for cache in (self._capabilities, _CAPABILITIES_CACHE):
+            if model in cache:
+                return cache[model]
         try:
-            data = self._post("/api/show", {"model": model}, timeout=15)
-            capabilities = data.get("capabilities", []) or []
-        except Exception:
-            capabilities = []
+            data = self._post("/api/show", {"model": model}, timeout=10)
+            capabilities = list(data.get("capabilities") or [])
+        except Exception as exc:
+            # Sans réponse, on retombe sur ce que le catalogue sait du modèle : conclure « pas de
+            # raisonnement » laisserait le mode réflexion actif, avec des réponses de 30 s dont le
+            # raisonnement fuit dans le texte livré.
+            known = models_catalog.LLM_MODELS.get(model, {})
+            capabilities = ["thinking"] if known.get("thinking") else []
+            log(f"Ollama : capacités de {model} indisponibles ({exc}) — "
+                f"repli sur le catalogue ({capabilities or 'aucune'})")
+            self._capabilities[model] = capabilities
+            return capabilities
         self._capabilities[model] = capabilities
+        _CAPABILITIES_CACHE[model] = capabilities
         return capabilities
 
     def supports_thinking(self, model=None):
@@ -181,7 +217,10 @@ class OllamaBackend:
         except ValueError as exc:
             raise ReformatError("Ollama : réponse illisible — texte brut collé") from exc
 
-        content = clean_output((data.get("message") or {}).get("content", ""))
+        try:
+            content = clean_output((data.get("message") or {}).get("content", ""))
+        except AttributeError as exc:
+            raise ReformatError("Ollama : réponse de forme inattendue — texte brut collé") from exc
         if not content:
             raise ReformatError("Le modèle local a renvoyé une réponse vide — texte brut collé")
         return content

@@ -163,3 +163,38 @@ def test_format_prefixe_les_regles_desactivees():
 
 def test_parse_list_text_ignore_vides_et_commentaires():
     assert vocabulary.parse_list_text("Claude\n\n# note\n  Ollama  \n") == ["Claude", "Ollama"]
+
+
+# ─── Régressions trouvées en revue ────────────────────────────────────────────
+
+def test_une_regle_courte_ne_mange_pas_l_elision():
+    # « système d » ne doit pas transformer « système d'exploitation » en « systemd'exploitation »
+    rules = [rule("système d", "systemd")]
+    assert vocabulary.apply_corrections("le système d'exploitation est à jour", rules) \
+        == "le système d'exploitation est à jour"
+    assert vocabulary.apply_corrections("relance le système d puis vérifie", rules) \
+        == "relance le systemd puis vérifie"
+
+
+def test_l_apostrophe_typographique_est_aussi_une_frontiere():
+    rules = [rule("système d", "systemd")]
+    assert "systemd" not in vocabulary.apply_corrections("le système d’exploitation", rules)
+
+
+def test_une_regex_dont_le_remplacement_echoue_ne_perd_pas_la_dictee():
+    # La référence de groupe n'existe pas : l'erreur ne survient qu'à l'application
+    rules = [rule(r"(\w+)", r"\2", regex=True), rule("ok", "OK")]
+    assert vocabulary.apply_corrections("ok bonjour", rules) == "OK bonjour"
+
+
+def test_une_regex_qui_matche_le_vide_est_ignoree():
+    rules = [rule(r"x*", "-", regex=True)]
+    assert vocabulary.apply_corrections("bonjour", rules) == "bonjour"
+
+
+def test_anthropique_est_fourni_mais_desarme():
+    # « impact anthropique » est du français légitime
+    config = {"corrections_enabled": True, "corrections": vocabulary.DEFAULT_CORRECTIONS,
+              "cloud_rule_enabled": False}
+    assert vocabulary.correct("l'impact anthropique du projet", config) \
+        == "l'impact anthropique du projet"

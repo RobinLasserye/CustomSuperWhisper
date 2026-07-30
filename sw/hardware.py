@@ -11,7 +11,7 @@ def get_gpu_list():
         output = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=index,name,memory.total",
              "--format=csv,noheader,nounits"],
-            text=True, stderr=subprocess.DEVNULL)
+            text=True, stderr=subprocess.DEVNULL, timeout=5)
     except Exception:
         return [("0", "GPU 0", None)]
 
@@ -40,7 +40,7 @@ def gpu_free_mib(index):
     try:
         output = subprocess.check_output(
             ["nvidia-smi", f"--id={index}", "--query-gpu=memory.free",
-             "--format=csv,noheader,nounits"], text=True, stderr=subprocess.DEVNULL)
+             "--format=csv,noheader,nounits"], text=True, stderr=subprocess.DEVNULL, timeout=5)
         return int(float(output.strip().split("\n")[0]))
     except Exception:
         return None

@@ -24,7 +24,7 @@ Ctrl + Alt + Maj + Espace   dicter, puis choisir le format et la langue dans un 
   GitHub, notes, instruction dev, traduction seule. Tous éditables, duplicables, et on peut en
   créer d'autres.
 - **Traduction universelle** : n'importe quel format peut sortir dans n'importe quelle langue
-  (15 proposées), dans le même appel — un mail formel en anglais, un ticket GitHub en japonais.
+  (14 proposées), dans le même appel — un mail formel en anglais, un ticket GitHub en japonais.
   La langue de sortie est vérifiée, avec une seconde tentative si le modèle l'a ignorée.
 - **Gestionnaire de modèles** : la VRAM de la carte est détectée, une configuration est conseillée
   avec ses chiffres mesurés (vitesse, VRAM, qualité), et les modèles se téléchargent en un clic.
@@ -41,7 +41,7 @@ Pour la reformulation locale, il faut [Ollama](https://ollama.com) et un modèle
 
 ```bash
 ollama pull qwen3:8b             # défaut conseillé (6,5 Go de VRAM)
-ollama pull qwen3:1.7b           # pour une carte de 4 à 6 Go
+ollama pull qwen3:1.7b           # sous 12 Go de VRAM (2,7 Go, presque aussi fiable)
 ```
 
 Ou bien depuis l'onglet **Modèles** des réglages, qui affiche les mesures et télécharge à votre
@@ -70,15 +70,15 @@ Ces paliers sont ceux que l'onglet **Modèles** applique en un clic. Détail et 
 
 | VRAM | Transcription | Reformulation | Total | Remarque |
 |---|---|---|---:|---|
-| 4 Go | large-v3-turbo int8 | qwen3:1.7b (ctx 2048) | 3,5 Go | décharger Whisper entre deux dictées |
-| 6 Go | large-v3-turbo int8 | qwen3:1.7b | 4,3 Go | messages courts de préférence |
-| 8 Go | large-v3-turbo int8 | qwen3.5:2b | 5,9 Go | bon compromis général |
+| 4 Go | large-v3-turbo int8 | qwen3:1.7b (ctx 2048) | 1,9 Go en alternance | Whisper déchargé entre deux dictées |
+| 6 Go | large-v3-turbo int8 | qwen3:1.7b | 4,3 Go | bon compromis |
+| 8 Go | large-v3 int8 | qwen3:1.7b | 5,1 Go | meilleure transcription du catalogue, 3 Go de marge |
 | 12 Go | large-v3 int8 | qwen3:8b | 8,8 Go | meilleur taux d'erreur mesuré |
-| 16 Go et + | large-v3 float16 | qwen3:8b | 10,7 Go | qualité maximale |
+| 16 Go et + | large-v3 int8 | qwen3:8b | 8,8 Go | meilleur WER mesuré ; float16 reste sélectionnable |
 
 Deux choses qui surprennent et que les mesures montrent :
 
-- **`large-v3-turbo` en int8** ne coûte que 1,6 Go, transcrit 55× plus vite que le temps réel, et
+- **`large-v3-turbo` en int8** ne coûte que 1,6 Go, transcrit 56× plus vite que le temps réel, et
   son taux d'erreur (0,268) est à deux points de `large-v3` en float16 qui coûte 2,6× plus.
 - **`distil-large-v3` est un modèle anglais** : 0,91 de taux d'erreur en français contre 0,25. Il
   est signalé comme tel dans l'interface.
@@ -91,17 +91,20 @@ jugés à l'aveugle par six jurés, puis soumis à un test de pièges automatis�
 
 | Modèle | Pièges | VRAM | Latence | Verdict |
 |---|---:|---:|---:|---|
-| **qwen3:8b** | **7/9** | 6,5 Go | 0,60 s | défaut : aucune invention relevée, seul à traduire correctement |
-| qwen3.5:2b | 5/9 | 4,3 Go | 0,53 s | correct pour 8 Go, perd des identifiants techniques |
-| qwen3:1.7b | 5/9 | 2,7 Go | 0,23 s | poids plume, à réserver aux messages courts |
-| qwen3.5:4b | 4/9 | 6,2 Go | 0,67 s | meilleur français, mais réécrit des chiffres dictés |
-| gemma3:4b-it-qat | 4/9 | 6,0 Go | 0,48 s | invente des détails (un raccourci clavier jamais dicté) |
-| granite4:micro | 2/9 | 3,3 Go | 0,42 s | **à éviter** : « jeudi » → « le jeûne », inversions de sens |
+| **qwen3:8b** | **6,67/9** | 6,5 Go | 0,60 s | défaut : aucune invention relevée, seul à traduire correctement |
+| **qwen3:1.7b** | **6,00/9** | 2,7 Go | 0,23 s | le rapport fiabilité/VRAM du catalogue : conseillé sous 12 Go |
+| qwen3.5:4b | 5,33/9 | 6,2 Go | 0,67 s | meilleur français, mais réécrit des chiffres dictés |
+| gemma3:4b-it-qat | 4,33/9 | 6,0 Go | 0,48 s | invente des détails (un raccourci clavier jamais dicté) |
+| qwen3.5:2b | 4,00/9 | 4,3 Go | 0,53 s | à éviter : moins fiable que qwen3:1.7b, deux fois plus lourd |
+| granite4:micro | 2,00/9 | 3,3 Go | 0,42 s | **à éviter** : « jeudi » → « le jeûne », inversions de sens |
+
+Scores moyennés sur **3 tirages par cas** : la génération n'étant pas déterministe même à
+température 0,2, un tirage unique varie de ±1 point.
 
 Pour évaluer un modèle qui n'est pas dans cette liste :
 
 ```bash
-python tools/eval_models.py mon-modele:tag
+python tools/eval_models.py mon-modele:tag --runs 3
 ```
 
 ## Développement

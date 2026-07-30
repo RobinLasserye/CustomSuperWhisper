@@ -6,6 +6,7 @@ Raccourcis :
   Ctrl + Alt + Maj + Espace   dicter, puis choisir le format et la langue dans un sélecteur
 """
 
+import copy
 import os
 import sys
 
@@ -84,6 +85,9 @@ class SuperWhisper(QObject):
         self.is_recording = False
         self.is_processing = False
         self.last_activity = time.monotonic()
+        self._settings_dialog = None
+        self._picker = None
+        self._pick_armed = False
 
         self.overlay = Overlay()
         self._build_tray()
@@ -244,12 +248,28 @@ class SuperWhisper(QObject):
     # ─── Réglages ────────────────────────────────────────────────────────────
 
     def _open_settings(self):
+        # Non-réentrant : le menu, le double-clic et SIGUSR1 peuvent tous appeler cette méthode
+        # pendant qu'un dialogue est déjà ouvert. Deux dialogues concurrents enregistrent chacun
+        # un dictionnaire complet, donc le dernier fermé écrase les réglages de l'autre.
+        if getattr(self, "_settings_dialog", None) is not None:
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
+            return
+
         previous = (self.config.get("model"), self.config.get("gpu_index"),
                     self.config.get("compute_type"))
         previous_llm = self.config.get("ollama_model")
 
-        dialog = SettingsDialog(dict(self.config))
-        if dialog.exec() != QDialog.Accepted:
+        # Copie profonde : la fenêtre modifie les consignes en place ; avec une copie de surface,
+        # un format personnalisé édité puis abandonné restait dans la config vivante et finissait
+        # écrit sur le disque au prochain enregistrement.
+        dialog = SettingsDialog(copy.deepcopy(self.config))
+        self._settings_dialog = dialog
+        try:
+            accepted = dialog.exec() == QDialog.Accepted
+        finally:
+            self._settings_dialog = None
+        if not accepted:
             return
 
         self.config = config_module.load_config()
@@ -260,7 +280,10 @@ class SuperWhisper(QObject):
         current = (self.config.get("model"), self.config.get("gpu_index"),
                    self.config.get("compute_type"))
         if current != previous:
-            self.transcriber.unload()
+            # Décharger pendant qu'une transcription tourne ne rendrait aucune VRAM (le thread
+            # garde une référence) et empilerait un second modèle : `load_model` s'en occupe.
+            if not self.is_processing:
+                self.transcriber.unload()
             threading.Thread(target=self._preload, daemon=True).start()
         elif self.config.get("ollama_model") != previous_llm:
             threading.Thread(target=self._warm_up_backend, daemon=True).start()
@@ -279,6 +302,8 @@ class SuperWhisper(QObject):
             elif key in (keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r):
                 pressed["shift"] = True
             elif key == keyboard.Key.space and pressed["ctrl"] and pressed["alt"]:
+                # Maj compte qu'il soit tenu au démarrage ou à l'arrêt : exiger les deux serait un
+                # piège, et le raccourci documenté ne marcherait qu'à la seconde frappe.
                 self._toggle(pick=pressed["shift"])
 
         def on_release(key):
@@ -301,6 +326,7 @@ class SuperWhisper(QObject):
     def _toggle(self, pick=False):
         self.last_activity = time.monotonic()
         if not self.is_recording:
+            self._pick_armed = pick
             self.is_recording = True
             try:
                 self.recorder.start()
@@ -322,7 +348,8 @@ class SuperWhisper(QObject):
             return
         self.is_processing = True
         self.signals.transcription_started.emit()
-        threading.Thread(target=self._transcribe, args=(audio, pick), daemon=True).start()
+        threading.Thread(target=self._transcribe,
+                         args=(audio, pick or self._pick_armed), daemon=True).start()
 
     # ─── Chaîne de traitement ────────────────────────────────────────────────
 
@@ -352,9 +379,20 @@ class SuperWhisper(QObject):
 
     def _on_picker_requested(self, text):
         """Ouvre le sélecteur — sur le fil graphique, obligatoirement."""
+        if getattr(self, "_picker", None) is not None:
+            # Une dictée relancée pendant que le sélecteur est ouvert : on garde le premier
+            # sélecteur et on colle le texte brut de la seconde, sans empiler les fenêtres.
+            log("sélecteur déjà ouvert — texte brut conservé pour cette dictée")
+            self.signals.transcription_done.emit(text, True)
+            return
+
         self.overlay.hide_now()
-        picker = PresetPicker(self.config, text)
-        accepted = picker.exec() == QDialog.Accepted
+        picker = PresetPicker(copy.deepcopy(self.config), text)
+        self._picker = picker
+        try:
+            accepted = picker.exec() == QDialog.Accepted
+        finally:
+            self._picker = None
         mode = picker.chosen_mode if accepted else presets.DISABLED
         language = picker.chosen_language if accepted else "none"
         threading.Thread(target=self._reformat_and_finish,

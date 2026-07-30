@@ -147,3 +147,35 @@ def test_motifs_personnalises_pris_en_compte():
     text, _ = artifacts.filter_transcription(
         segments, {"artifact_patterns": ["generique de fin"]})
     assert text == "Bonjour."
+
+
+# ─── Régressions trouvées en revue ────────────────────────────────────────────
+
+def test_la_typographie_francaise_du_texte_conserve_est_intacte():
+    text, _ = artifacts.strip_artifacts(
+        "Bonjour ! Ça va ? Sous-titrage ST' 501", artifacts.DEFAULT_ARTIFACT_PATTERNS)
+    assert text == "Bonjour ! Ça va ?"          # les espaces avant ! et ? doivent rester
+
+
+def test_un_motif_ne_traverse_pas_une_fin_de_phrase():
+    phrase = "On dit merci. D'avoir regardé cette vidéo, on en reparlera demain."
+    text, removed = artifacts.strip_artifacts(phrase, artifacts.DEFAULT_ARTIFACT_PATTERNS)
+    assert text == phrase
+    assert removed == []
+
+
+def test_le_point_colle_reste_un_separateur():
+    # « amara.org » doit continuer à correspondre au motif « amara org »
+    text, removed = artifacts.strip_artifacts(
+        "Fin. Sous-titres par Amara.org", artifacts.DEFAULT_ARTIFACT_PATTERNS)
+    assert text == "Fin."
+    assert removed
+
+
+def test_un_chevauchement_ne_laisse_pas_de_fragment():
+    text, removed = artifacts.strip_artifacts(
+        "Bonjour. Sous-titres réalisés par la communauté d'Amara.org",
+        artifacts.DEFAULT_ARTIFACT_PATTERNS)
+    assert text == "Bonjour."
+    assert "Sous-titres" not in text
+    assert len(removed) == 1

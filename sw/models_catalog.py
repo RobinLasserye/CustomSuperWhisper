@@ -57,9 +57,10 @@ WHISPER_PROFILES = {
 LLM_MODELS = {
     "qwen3:8b": {
         "label": "qwen3:8b", "size_gb": 5.2, "vram_mib": 6660, "vram_mib_min": 5710,
-        "latency_s": 0.60, "latency_p90": 2.42, "long_s": 12.0, "thinking": True,
-        "jury": {"fidelite": 4.52, "consigne": 3.73, "langue": 3.10}, "traps": (7, 9),
-        "note": "Le plus fiable du catalogue : 7/9 au test de pièges, meilleure fidélité au "
+        "latency_s": 0.60, "latency_p90": 2.42, "long_s": 14.3, "thinking": True,
+        "jury": {"fidelite": 4.52, "consigne": 3.73, "langue": 3.10}, "traps": (6.67, 9),
+        "note": "Le plus fiable du catalogue : 6,67/9 au test de pièges (3 tirages), meilleure "
+                "fidélité au "
                 "jugement à l'aveugle (aucune invention de chiffre, de nom ou de raccourci "
                 "relevée), et seul à respecter une demande de traduction en japonais. Son seul "
                 "échec : « un giga six » perdu à la traduction. Modèle par défaut.",
@@ -67,35 +68,36 @@ LLM_MODELS = {
     "qwen3.5:4b": {
         "label": "qwen3.5:4b", "size_gb": 3.4, "vram_mib": 6350, "vram_mib_min": 5840,
         "latency_s": 0.67, "latency_p90": 1.83, "long_s": 11.9, "thinking": True,
-        "jury": {"fidelite": 4.04, "consigne": 3.88, "langue": 4.00}, "traps": (4, 9),
+        "jury": {"fidelite": 4.04, "consigne": 3.88, "langue": 4.00}, "traps": (5.33, 9),
         "note": "Meilleur français du panel et meilleur respect des consignes ; conserve "
                 "1664/1664 mots et 60/60 chiffres sur une dictée de 4 min 30. Deux faiblesses "
-                "mesurées : il peut réécrire un chiffre dicté à l'oral (« un giga six » → "
-                "« 6 GB »), fausser un terme métier (« recette » → « réception »), et il a ignoré "
-                "une demande de traduction en japonais (rattrapé par la seconde tentative "
-                "automatique). À préférer quand la qualité de la prose française primes sur la "
-                "restitution des chiffres.",
+                "mesurées : il réécrit des chiffres dictés à l'oral (« un giga six » → « 6 GB »), "
+                "fausse un terme métier (« recette » → « réception »), et il a ignoré une demande "
+                "de traduction en japonais — rattrapé par la seconde tentative automatique. "
+                "À préférer quand la qualité de la prose française prime sur la restitution "
+                "exacte des chiffres.",
     },
     "qwen3.5:2b": {
         "label": "qwen3.5:2b", "size_gb": 1.8, "vram_mib": 4390, "vram_mib_min": 4110,
         "latency_s": 0.53, "latency_p90": 1.70, "long_s": None, "thinking": True,
-        "jury": None, "traps": (5, 9),
-        "note": "Bon compromis pour une carte de 8 Go : 5/9 au test de pièges, aucune inversion "
-                "de sens relevée, mais il perd des identifiants techniques (« little endian », "
-                "« SteamVR ») sur une dictée dense et ne traduit pas en japonais.",
+        "jury": None, "traps": (4.0, 9),
+        "note": "À éviter : 4,00/9 au test de pièges, moins fiable que qwen3:1.7b qui est pourtant "
+                "deux fois plus léger. Il perd des montants dictés et des identifiants techniques "
+                "(« little endian », « SteamVR »), et ne traduit pas en japonais.",
     },
     "qwen3:1.7b": {
         "label": "qwen3:1.7b", "size_gb": 1.4, "vram_mib": 2740, "vram_mib_min": 1990,
         "latency_s": 0.23, "latency_p90": 0.89, "long_s": None, "thinking": True,
-        "jury": None, "traps": (5, 9),
-        "note": "Le vrai poids plume : 2,0 Go en contexte court, latence 0,23 s. Convient aux "
-                "messages courts (il garde les nuances et les noms propres) mais perd des "
-                "chiffres sur une dictée longue. Seul choix viable sous 6 Go.",
+        "jury": None, "traps": (6.0, 9),
+        "note": "Le meilleur rapport fiabilité/VRAM du catalogue : 6,00/9 au test de pièges pour "
+                "2,0 Go seulement et 0,23 s de latence — juste derrière qwen3:8b, et devant tous "
+                "les modèles plus gros. Il échoue sur les identifiants techniques denses et ne "
+                "traduit pas en japonais. Le choix pour toute carte de moins de 12 Go.",
     },
     "gemma3:4b-it-qat": {
         "label": "gemma3:4b-it-qat", "size_gb": 4.0, "vram_mib": 6140, "vram_mib_min": 6040,
         "latency_s": 0.48, "latency_p90": 1.91, "long_s": 5.8, "thinking": False,
-        "jury": {"fidelite": 2.82, "consigne": 3.59, "langue": 3.85}, "traps": (4, 9),
+        "jury": {"fidelite": 2.82, "consigne": 3.59, "langue": 3.85}, "traps": (4.33, 9),
         "note": "Français propre et seul japonais vraiment idiomatique, mais il invente : "
                 "raccourci « Ctrl+Alt+E » jamais dicté, « int8 » devenu « with 8GB », numéro de "
                 "facture fabriqué. À éviter si le message part sans relecture.",
@@ -103,7 +105,7 @@ LLM_MODELS = {
     "granite4:micro": {
         "label": "granite4:micro", "size_gb": 2.1, "vram_mib": 3380, "vram_mib_min": 2460,
         "latency_s": 0.42, "latency_p90": 0.95, "long_s": 5.3, "thinking": False,
-        "jury": {"fidelite": 1.61, "consigne": 2.21, "langue": 2.10}, "traps": (2, 9),
+        "jury": {"fidelite": 1.61, "consigne": 2.21, "langue": 2.10}, "traps": (2.0, 9),
         "note": "DÉCONSEILLÉ malgré son poids : il produit des faux. « je pense que je vais pas "
                 "pouvoir venir » devient « j'ai pas vraiment envie de venir », « jeudi » devient "
                 "« le jeûne », un budget passe du lot deux à tout le projet. Le plus léger, mais "
@@ -123,24 +125,27 @@ DEFAULT_LLM_MODEL = "qwen3:8b"
 VRAM_TIERS = [
     {"max_gb": 4, "whisper": ("large-v3-turbo", "int8"), "llm": "qwen3:1.7b", "num_ctx": 2048,
      "strategy": "alternance",
-     "comment": "1,6 Go pour Whisper et 2,0 Go pour le modèle de reformulation : sur 4 Go il faut "
+     "comment": "1,6 Go pour Whisper et 1,9 Go pour le modèle de reformulation : sur 4 Go il faut "
                 "décharger Whisper entre deux dictées (réglage « Décharger Whisper après »). "
                 "Évitez les dictées de plus de deux minutes, ce modèle perd des chiffres au-delà."},
     {"max_gb": 6, "whisper": ("large-v3-turbo", "int8"), "llm": "qwen3:1.7b", "num_ctx": 8192,
      "strategy": "cohabitation",
-     "comment": "1,6 + 2,7 Go : les deux modèles tiennent ensemble. turbo en int8 transcrit 55× "
+     "comment": "1,6 + 2,7 Go : les deux modèles tiennent ensemble. turbo en int8 transcrit 56× "
                 "plus vite que le temps réel pour un WER de 0,27, presque celui de large-v3."},
-    {"max_gb": 8, "whisper": ("large-v3-turbo", "int8"), "llm": "qwen3.5:2b", "num_ctx": 8192,
+    {"max_gb": 8, "whisper": ("large-v3", "int8"), "llm": "qwen3:1.7b", "num_ctx": 8192,
      "strategy": "cohabitation",
-     "comment": "1,6 + 4,4 Go, avec 2 Go de marge pour le bureau. Reformulation nettement plus "
-                "sûre qu'avec un modèle de 1,7 milliard de paramètres."},
+     "comment": "2,4 + 2,7 Go : on peut se payer le meilleur modèle de transcription du catalogue "
+                "(WER 0,243) tout en gardant 3 Go de marge. Mesuré : qwen3:1.7b est plus fiable "
+                "que qwen3.5:2b, pourtant deux fois plus lourd."},
     {"max_gb": 12, "whisper": ("large-v3", "int8"), "llm": "qwen3:8b", "num_ctx": 8192,
      "strategy": "cohabitation",
      "comment": "large-v3 en int8 atteint le meilleur WER mesuré (0,243 avec biais) pour 2,4 Go, "
                 "et qwen3:8b est le modèle le plus fidèle du catalogue."},
-    {"max_gb": None, "whisper": ("large-v3", "float16"), "llm": "qwen3:8b", "num_ctx": 8192,
+    {"max_gb": None, "whisper": ("large-v3", "int8"), "llm": "qwen3:8b", "num_ctx": 8192,
      "strategy": "cohabitation",
-     "comment": "Configuration confortable : 4,3 + 6,6 Go, rien à décharger, qualité maximale."},
+     "comment": "large-v3 en int8 obtient le meilleur WER mesuré du catalogue (0,243) pour 2,4 Go, "
+                "donc rien ne justifie float16 (0,251 pour 4,3 Go) même quand la VRAM est là. "
+                "float16 reste sélectionnable dans l'onglet Transcription."},
 ]
 
 
@@ -173,18 +178,28 @@ def recommend(vram_mib):
     return VRAM_TIERS[-1]
 
 
-def total_vram_mib(whisper_model, compute_type, llm_model, num_ctx=8192):
-    """VRAM cumulée si les deux modèles cohabitent."""
+def total_vram_mib(whisper_model, compute_type, llm_model, num_ctx=8192,
+                   strategy="cohabitation"):
+    """VRAM nécessaire pour la combinaison.
+
+    En « cohabitation » les deux modèles restent chargés : les besoins s'additionnent. En
+    « alternance » Whisper est déchargé entre deux dictées, donc seul le plus gourmand des deux
+    doit tenir à un instant donné.
+    """
     profile = whisper_profile(whisper_model, compute_type)
     whisper_mib = profile["vram_mib"] if profile else 0
     llm = LLM_MODELS.get(llm_model, {})
     llm_mib = llm.get("vram_mib_min" if num_ctx <= 2048 else "vram_mib", 0)
+    if strategy == "alternance":
+        return max(whisper_mib, llm_mib)
     return whisper_mib + llm_mib
 
 
-def fits(vram_mib, whisper_model, compute_type, llm_model, num_ctx=8192, headroom_mib=1024):
+def fits(vram_mib, whisper_model, compute_type, llm_model, num_ctx=8192, headroom_mib=1024,
+         strategy="cohabitation"):
     """La combinaison tient-elle dans la carte, en gardant de la marge pour le bureau ?"""
-    return total_vram_mib(whisper_model, compute_type, llm_model, num_ctx) + headroom_mib <= vram_mib
+    needed = total_vram_mib(whisper_model, compute_type, llm_model, num_ctx, strategy)
+    return needed + headroom_mib <= vram_mib
 
 
 # ─── Téléchargements ──────────────────────────────────────────────────────────
@@ -205,11 +220,12 @@ def download_whisper(model):
     return download_model(model)
 
 
-def ollama_installed_models(host):
-    """Modèles présents localement dans Ollama."""
+def ollama_installed_models(host, timeout=5):
+    """Modèles présents localement dans Ollama. Le délai est court quand l'appel vient de
+    l'interface : la fenêtre ne doit pas geler si l'hôte configuré ne répond pas."""
     import json
     import urllib.request
-    with urllib.request.urlopen(host.rstrip("/") + "/api/tags", timeout=5) as response:
+    with urllib.request.urlopen(host.rstrip("/") + "/api/tags", timeout=timeout) as response:
         data = json.loads(response.read().decode())
     return [entry["name"] for entry in data.get("models", [])]
 
@@ -217,26 +233,45 @@ def ollama_installed_models(host):
 def pull_ollama_model(host, model, progress=None):
     """Télécharge un modèle Ollama en suivant la progression.
 
-    `progress` est appelé avec (statut, octets_reçus, octets_totaux). Bloquant.
+    `progress` est appelé avec (statut, octets_reçus, octets_totaux). Bloquant. Lève si le flux
+    s'interrompt avant l'événement final.
     """
     import json
+    import urllib.error
     import urllib.request
 
     request = urllib.request.Request(
         host.rstrip("/") + "/api/pull",
         data=json.dumps({"model": model, "stream": True}).encode(),
         headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(request, timeout=3600) as response:
-        for raw_line in response:
-            line = raw_line.decode().strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if event.get("error"):
-                raise RuntimeError(event["error"])
-            if progress:
-                progress(event.get("status", ""), event.get("completed"), event.get("total"))
+    finished = False
+    try:
+        with urllib.request.urlopen(request, timeout=3600) as response:
+            for raw_line in response:
+                line = raw_line.decode().strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if event.get("error"):
+                    raise RuntimeError(event["error"])
+                status = event.get("status", "")
+                if status == "success":
+                    finished = True
+                if progress:
+                    progress(status, event.get("completed"), event.get("total"))
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode()[:200]
+        except Exception:
+            pass
+        raise RuntimeError(f"Ollama a répondu {exc.code}{' : ' + detail if detail else ''}") from exc
+
+    if not finished:
+        # Le flux s'est arrêté sans l'événement « success » : le modèle n'est pas complet, et
+        # annoncer une réussite ferait croire à un téléchargement terminé.
+        raise RuntimeError("téléchargement interrompu avant la fin")
     return True

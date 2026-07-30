@@ -32,7 +32,9 @@ DEFAULT_CORRECTIONS = [
     {"from": "clode", "to": "Claude", "regex": False, "enabled": True},
     {"from": "cloude", "to": "Claude", "regex": False, "enabled": True},
     {"from": "claud", "to": "Claude", "regex": False, "enabled": True},
-    {"from": "anthropique", "to": "Anthropic", "regex": False, "enabled": True},
+    # « anthropique » est un vrai adjectif français (« impact anthropique ») : fournie mais
+    # désactivée, à activer si l'on ne parle jamais d'environnement.
+    {"from": "anthropique", "to": "Anthropic", "regex": False, "enabled": False},
     {"from": "olama", "to": "Ollama", "regex": False, "enabled": True},
     {"from": "ollamma", "to": "Ollama", "regex": False, "enabled": True},
     {"from": "git hub", "to": "GitHub", "regex": False, "enabled": True},
@@ -77,13 +79,19 @@ def build_initial_prompt(vocabulary):
 
 # ─── Moteur de corrections ────────────────────────────────────────────────────
 
+# Les gardes excluent aussi l'apostrophe : sans ça, la règle « système d » mange le « d' » de
+# « système d'exploitation » et produit « systemd'exploitation ».
+_GUARD_BEFORE = r"(?<![\w'’])"
+_GUARD_AFTER = r"(?![\w'’])"
+
+
 def literal_pattern(text):
-    """Motif regex pour une expression littérale : insensible à la casse, espaces souples,
-    et bornée par des gardes de mot (`\\b` échouerait sur un motif finissant par une apostrophe
-    ou un point)."""
+    """Motif regex pour une expression littérale : insensible à la casse, espaces souples, et
+    bornée par des gardes de mot (`\b` échouerait sur un motif finissant par une apostrophe ou un
+    point, et laisserait passer l'élision française)."""
     words = [re.escape(w) for w in text.split()]
     body = r"\s+".join(words) if words else re.escape(text)
-    return rf"(?<!\w){body}(?!\w)"
+    return rf"{_GUARD_BEFORE}{body}{_GUARD_AFTER}"
 
 
 def compile_rule(rule):
@@ -107,9 +115,14 @@ def apply_corrections(text, corrections):
             continue
         try:
             compiled, replacement = compile_rule(rule)
+            if rule.get("regex") and compiled.match(""):
+                continue                  # un motif qui matche le vide pulvériserait le texte
+            # `sub` peut lever à son tour : une référence de groupe inexistante dans le
+            # remplacement n'échoue qu'à l'application. Une règle fautive ne doit jamais faire
+            # perdre une dictée.
+            text = compiled.sub(replacement, text)
         except re.error:
-            continue                      # une regex utilisateur invalide ne casse pas la dictée
-        text = compiled.sub(replacement, text)
+            continue
     return text
 
 
@@ -144,7 +157,7 @@ def correct(text, config):
     """Chaîne complète de correction, telle que l'application l'utilise."""
     if not config.get("corrections_enabled", True):
         return text
-    text = apply_corrections(text, config.get("corrections"))
+    text = apply_corrections(text, config.get("corrections", DEFAULT_CORRECTIONS))
     if config.get("cloud_rule_enabled", True):
         text = apply_cloud_rule(text, config.get("cloud_exceptions"))
     return text

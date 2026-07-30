@@ -61,7 +61,7 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(_scrollable(self._build_vocabulary_tab()), "Vocabulaire")
         self.tabs.addTab(_scrollable(self._build_cleanup_tab()), "Nettoyage")
         self.tabs.addTab(_scrollable(self._build_reformat_tab()), "Reformulation")
-        self.models_tab = ModelsTab(config)
+        self.models_tab = ModelsTab(config, on_apply=self._apply_recommendation)
         self.tabs.addTab(_scrollable(self.models_tab), "Modèles")
         self.tabs.addTab(_scrollable(self._build_general_tab()), "Général")
         layout.addWidget(self.tabs, 1)
@@ -449,10 +449,14 @@ class SettingsDialog(QDialog):
 
         if mode in presets.BUILTIN_PRESETS:
             overrides = dict(self.config.get("reformat_prompt_overrides", {}))
-            if text.strip() and text != presets.BUILTIN_PRESETS[mode]["prompt"]:
-                overrides[mode] = text
-            else:
+            if not text.strip():
+                # Zone vidée par mégarde (Ctrl+A puis Suppr) : on ne touche pas à la surcharge.
+                # Le bouton « Réinitialiser » est le seul moyen explicite de revenir au défaut.
+                pass
+            elif text == presets.BUILTIN_PRESETS[mode]["prompt"]:
                 overrides.pop(mode, None)
+            else:
+                overrides[mode] = text
             self.config["reformat_prompt_overrides"] = overrides
             mode_backends = dict(self.config.get("reformat_mode_backends", {}))
             if backend:
@@ -465,17 +469,20 @@ class SettingsDialog(QDialog):
             for custom in self.config.get("reformat_custom_modes", []):
                 if custom.get("name") == name:
                     custom["prompt"] = text
-                    custom["backend"] = backend or "ollama"
+                    custom["backend"] = backend        # vide = suivre le backend par défaut
                     break
 
-    def _add_custom_mode(self, prompt=""):
+    def _add_custom_mode(self, prompt="", suggested="Mon format"):
+        # La consigne affichée peut avoir été éditée : on l'enregistre avant de changer de format
+        self._store_current_prompt()
         name, accepted = QInputDialog.getText(self, "Nouveau format", "Nom du format :",
-                                              text="Mon format")
+                                              text=suggested)
         if not accepted or not name.strip():
             return
         name = name.strip()
         customs = self.config.setdefault("reformat_custom_modes", [])
         if any(custom.get("name") == name for custom in customs):
+            self.status_message(f"Le format « {name} » existe déjà — choisis un autre nom.")
             return
         customs.append({"name": name, "prompt": prompt or "", "backend": "ollama"})
         self._current_mode = None
@@ -485,7 +492,25 @@ class SettingsDialog(QDialog):
 
     def _duplicate_mode(self):
         self._store_current_prompt()
-        self._add_custom_mode(self.prompt_edit.toPlainText())
+        self._add_custom_mode(self.prompt_edit.toPlainText(),
+                              suggested=self._free_name(
+                                  presets.mode_label(self.config,
+                                                     self.mode_combo.currentData())))
+
+    def _free_name(self, base):
+        existing = {custom.get("name")
+                    for custom in self.config.get("reformat_custom_modes", [])}
+        candidate = f"{base} (copie)"
+        index = 2
+        while candidate in existing:
+            candidate = f"{base} (copie {index})"
+            index += 1
+        return candidate
+
+    def status_message(self, text):
+        """Message d'information affiché dans l'onglet Modèles (seule zone de statut)."""
+        if getattr(self, "models_tab", None) is not None:
+            self.models_tab.status.setText(text)
 
     def _reset_prompt(self):
         mode = self.mode_combo.currentData()
@@ -497,6 +522,7 @@ class SettingsDialog(QDialog):
         self.prompt_edit.setPlainText(presets.BUILTIN_PRESETS[mode]["prompt"])
 
     def _delete_custom_mode(self):
+        self._store_current_prompt()
         mode = self.mode_combo.currentData()
         if not mode or not mode.startswith(presets.CUSTOM_PREFIX):
             return
@@ -544,6 +570,24 @@ class SettingsDialog(QDialog):
 
         layout.addStretch()
         return page
+
+    def _apply_recommendation(self, values):
+        """Pousse une configuration conseillée dans les widgets, pour que l'affichage et ce qui
+        sera enregistré ne divergent jamais."""
+        if "model" in values:
+            self._select(self.model_combo, values["model"])
+        if "compute_type" in values:
+            self._select(self.compute_combo, values["compute_type"])
+        if "ollama_num_ctx" in values:
+            self._select(self.num_ctx_combo, values["ollama_num_ctx"])
+        if "whisper_idle_unload_min" in values:
+            self.unload_spin.setValue(int(values["whisper_idle_unload_min"]))
+        if "ollama_model" in values:
+            index = self.ollama_model_combo.findText(values["ollama_model"])
+            if index >= 0:
+                self.ollama_model_combo.setCurrentIndex(index)
+            else:
+                self.ollama_model_combo.setEditText(values["ollama_model"])
 
     # ─── Utilitaires ─────────────────────────────────────────────────────────
 
@@ -600,11 +644,6 @@ class SettingsDialog(QDialog):
         self.config["auto_paste"] = self.auto_paste_check.isChecked()
         self.config["auto_paste_after_picker"] = self.auto_paste_picker_check.isChecked()
         self.config["picker_shows_language"] = self.picker_language_check.isChecked()
-
-        # Une configuration appliquée depuis l'onglet « Modèles » écrase les combos concernées
-        pending = getattr(self.models_tab, "pending_apply", None)
-        if pending:
-            self.config.update(pending)
 
         save_config(self.config)
         self.accept()

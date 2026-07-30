@@ -43,18 +43,26 @@ STOPWORDS = {
 
 
 def script_ratio(text, code):
-    """Part de caractères appartenant à l'écriture attendue, parmi les caractères non espaces."""
+    """Part de l'écriture attendue parmi les caractères *porteurs de langue*.
+
+    Le dénominateur ne compte que les lettres : un ticket en japonais truffé de Markdown, de
+    chemins de fichiers et de noms de touches serait sinon déclaré « pas en japonais » alors qu'il
+    l'est.
+    """
     ranges = SCRIPT_RANGES.get(code)
     if not ranges:
         return None
-    total = sum(1 for char in text if not char.isspace())
-    if not total:
-        return 0.0
     hits = 0
+    latin = 0
     for char in text:
         point = ord(char)
         if any(start <= point <= end for start, end in ranges):
             hits += 1
+        elif char.isalpha():
+            latin += 1
+    total = hits + latin
+    if not total:
+        return 0.0
     return hits / total
 
 
@@ -95,4 +103,8 @@ def looks_like(text, code):
         return False                      # visiblement resté en français
     if target == 0 and french == 0:
         return None                       # langue inconnue, on ne juge pas
-    return target >= french
+    if french == 0:
+        return True
+    # Strictement plus : à égalité, rien ne distingue un texte français d'un texte cible, et
+    # beaucoup de mots courts sont communs aux langues latines.
+    return target > french
