@@ -358,6 +358,31 @@ def get_audio_inputs():
 
 def clipboard_copy(text):
     """Copy text to clipboard — cross-platform."""
+    if IS_LINUX:
+        # Use wl-copy on Wayland (QClipboard is unreliable without focus)
+        try:
+            subprocess.run(
+                ["wl-copy", "--", text],
+                timeout=3, check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        except (FileNotFoundError, subprocess.SubprocessError):
+            pass
+        # Fallback: xclip for X11
+        try:
+            subprocess.run(
+                ["xclip", "-selection", "clipboard"],
+                input=text.encode(), timeout=3, check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return
+        except (FileNotFoundError, subprocess.SubprocessError):
+            pass
+    # Final fallback / Windows: Qt clipboard
     clipboard = QApplication.clipboard()
     clipboard.setText(text)
 
