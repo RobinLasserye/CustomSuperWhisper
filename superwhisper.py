@@ -1,1080 +1,69 @@
 #!/usr/bin/env python3
-"""SuperWhisper Custom — Transcription vocale locale avec GUI (Linux + Windows)."""
+"""SuperWhisper Custom — transcription vocale locale, reformulation locale, traduction.
+
+Raccourcis :
+  Ctrl + Alt + Espace         dicter, puis appliquer le format par défaut
+  Ctrl + Alt + Maj + Espace   dicter, puis choisir le format et la langue dans un sélecteur
+"""
 
 import os
 import sys
-import platform
 
-IS_WINDOWS = platform.system() == "Windows"
-IS_LINUX = platform.system() == "Linux"
+# Doit tourner avant toute importation de faster_whisper : sous Linux, le loader dynamique ne
+# relit pas LD_LIBRARY_PATH après le démarrage du processus, donc on se ré-exécute.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sw.runtime import ensure_cuda_libs                                   # noqa: E402
 
-# Ensure CUDA libraries are discoverable
-_site = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "Lib", "site-packages") if IS_WINDOWS else \
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "lib",
-                     f"python{sys.version_info.major}.{sys.version_info.minor}", "site-packages")
-if IS_WINDOWS:
-    _cuda_paths = [
-        os.path.join(_site, "nvidia", "cublas", "bin"),
-        os.path.join(_site, "nvidia", "cudnn", "bin"),
-    ]
-    _existing = [p for p in _cuda_paths if os.path.isdir(p)]
-    if _existing:
-        os.environ["PATH"] = ";".join(_existing) + ";" + os.environ.get("PATH", "")
-elif IS_LINUX:
-    _cuda_paths = [
-        os.path.join(_site, "nvidia", "cublas", "lib"),
-        os.path.join(_site, "nvidia", "cudnn", "lib"),
-    ]
-    _existing = [p for p in _cuda_paths if os.path.isdir(p)]
-    if _existing:
-        ld = os.environ.get("LD_LIBRARY_PATH", "")
-        os.environ["LD_LIBRARY_PATH"] = ":".join(_existing) + (":" + ld if ld else "")
+ensure_cuda_libs(os.path.abspath(__file__))
 
-import json
-import threading
-import subprocess
-import time
-import numpy as np
+import threading                                                          # noqa: E402
+import time                                                               # noqa: E402
+
+from PySide6.QtCore import QObject, QSize, QTimer, Qt, Signal             # noqa: E402
+from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPixmap  # noqa: E402
+from PySide6.QtWidgets import (                                           # noqa: E402
+    QApplication, QDialog, QMenu, QSystemTrayIcon,
+)
+
+from sw import backends, config as config_module, instance, presets       # noqa: E402
+from sw.audio import SAMPLE_RATE, AudioRecorder                           # noqa: E402
+from sw.clipboard import auto_paste, clipboard_copy                       # noqa: E402
+from sw.runtime import IS_WINDOWS, log                                    # noqa: E402
+from sw.transcriber import Transcriber                                    # noqa: E402
+from sw.ui.overlay import Overlay                                         # noqa: E402
+from sw.ui.picker import PresetPicker                                     # noqa: E402
+from sw.ui.settings import SettingsDialog                                 # noqa: E402
 
 if not IS_WINDOWS:
     import signal
 
-from PySide6.QtWidgets import (
-    QApplication, QWidget, QSystemTrayIcon, QMenu, QLabel, QVBoxLayout,
-    QGraphicsOpacityEffect, QDialog, QComboBox, QPushButton,
-    QFormLayout, QGroupBox, QPlainTextEdit, QHBoxLayout, QLineEdit,
-    QInputDialog,
-)
-from PySide6.QtCore import Qt, QTimer, Signal, QObject, QSize
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QAction
-
-SAMPLE_RATE = 16000
-NUM_BARS = 40
-
-if IS_WINDOWS:
-    CONFIG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "superwhisper-custom")
-else:
-    CONFIG_DIR = os.path.expanduser("~/.config/superwhisper-custom")
-
-CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
-PID_FILE = os.path.join(CONFIG_DIR, "superwhisper.pid")
-LOCK_FILE = os.path.join(CONFIG_DIR, "superwhisper.lock")
-
-AVAILABLE_MODELS = [
-    "large-v3", "large-v3-turbo", "distil-large-v3",
-    "medium", "small", "base", "tiny",
-]
-AVAILABLE_LANGUAGES = [
-    ("Français", "fr"), ("Anglais", "en"), ("Espagnol", "es"),
-    ("Allemand", "de"), ("Italien", "it"), ("Portugais", "pt"),
-    ("Japonais", "ja"), ("Chinois", "zh"), ("Auto-détection", None),
-]
-
-if IS_WINDOWS:
-    CLAUDE_BIN = os.path.join(os.environ.get("APPDATA", ""), "npm", "claude.cmd")
-    if not os.path.exists(CLAUDE_BIN):
-        CLAUDE_BIN = "claude"  # fallback to PATH
-else:
-    CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
-
-CLAUDE_BUILTIN_MODES = {
-    "message": {
-        "name": "Message",
-        "prompt": (
-            "Tu reçois une transcription vocale brute. Nettoie-la pour en faire un message "
-            "prêt à envoyer (Facebook, SMS, Discord, etc.).\n\n"
-            "CE QUE TU DOIS FAIRE :\n"
-            "- Supprimer les hésitations (euh, bah, genre, en fait répété, du coup répété)\n"
-            "- Corriger la grammaire et la ponctuation\n"
-            "- Ajouter des retours à la ligne pour aérer quand le message est long\n"
-            "- Supprimer les strictes répétitions (quand la même chose est dite deux fois de suite)\n"
-            "- Rendre les phrases fluides et naturelles\n\n"
-            "CE QUE TU NE DOIS PAS FAIRE :\n"
-            "- NE PAS résumer, NE PAS raccourcir, NE PAS supprimer des informations ou des idées\n"
-            "- NE PAS changer le sens ou le ton du message\n"
-            "- NE PAS ajouter de contenu, de commentaire, de guillemets\n"
-            "- NE PAS faire de résumé : CHAQUE idée et information du texte original doit être conservée\n\n"
-            "Le message nettoyé doit faire à peu près la même longueur que l'original. "
-            "Renvoie UNIQUEMENT le message nettoyé, rien d'autre."
-        ),
-    },
-    "compact": {
-        "name": "Compact",
-        "prompt": (
-            "Tu reçois une transcription vocale brute. Transforme-la en un message compact et "
-            "synthétique, prêt à envoyer par message.\n\n"
-            "CE QUE TU DOIS FAIRE :\n"
-            "- Supprimer toutes les hésitations, répétitions, digressions et reformulations\n"
-            "- Synthétiser au maximum : aller droit au but, phrases courtes et percutantes\n"
-            "- Fusionner les idées redondantes en une seule formulation claire\n"
-            "- Corriger la grammaire et la ponctuation\n"
-            "- Garder le ton naturel et conversationnel\n"
-            "- Structurer avec des retours à la ligne si plusieurs points distincts\n\n"
-            "CE QUE TU NE DOIS PAS FAIRE :\n"
-            "- NE PAS perdre d'information clé ou d'idée importante\n"
-            "- NE PAS changer le sens du message\n"
-            "- NE PAS ajouter de contenu, de commentaire, de guillemets\n"
-            "- NE PAS transformer en liste à puces ou format formel\n\n"
-            "L'objectif est un message le plus court possible tout en conservant "
-            "TOUTES les informations et idées essentielles. "
-            "Renvoie UNIQUEMENT le message compact, rien d'autre."
-        ),
-    },
-    "dev": {
-        "name": "Développement",
-        "prompt": (
-            "Tu reçois une transcription vocale brute d'un développeur qui décrit une tâche, "
-            "un bug, ou une fonctionnalité à implémenter. Transforme cette transcription en une "
-            "instruction de développement structurée, précise et complète, optimisée pour être "
-            "exécutée par Claude Code (Opus 4.6) en mode agentique.\n\n"
-            "STRUCTURE DE L'INSTRUCTION GÉNÉRÉE :\n\n"
-            "1. **Objectif** : Résumer clairement ce qui doit être fait en 1-2 phrases\n\n"
-            "2. **Détails et contexte** : Reprendre TOUTES les informations techniques "
-            "mentionnées (fichiers, variables, composants, comportements observés, etc.)\n\n"
-            "3. **Exigences** : Lister précisément ce qui est attendu, point par point\n\n"
-            "4. **Contraintes** : Mentionner les contraintes évoquées "
-            "(compatibilité, performance, ne pas casser l'existant, etc.)\n\n"
-            "5. **Stratégie d'exécution** : Selon la complexité de la tâche, ajouter la directive "
-            "appropriée parmi les suivantes :\n\n"
-            "   a) **Si la tâche implique du frontend/UI/design** (interfaces, pages web, "
-            "composants visuels, CSS, mise en page) : Ajouter l'instruction :\n"
-            '   "Utilise le skill /frontend-design pour générer des interfaces soignées et '
-            'production-ready. Invoque-le via l\'outil Skill avec skill: \"frontend-design\"."\n\n'
-            "   b) **Si la tâche est complexe, multi-fichiers, ou nécessite une grande rigueur** "
-            "(gros refactoring, feature touchant plusieurs modules, migration, "
-            "architecture) : Ajouter l'instruction :\n"
-            '   "Cette tâche nécessite le mode multi-agents. Utilise TeamCreate pour créer une équipe. '
-            "Organise l'équipe ainsi :\n"
-            "   - Un agent coordinateur (team lead) qui décompose le travail et assigne les tâches via TaskCreate\n"
-            "   - Un agent expert par sous-tâche technique (backend, frontend, DB, etc.) spawné via l'outil Task\n"
-            "   - Un agent qualité qui vérifie chaque livraison (tests, relecture, non-régression)\n"
-            "   Coordonne via SendMessage entre agents. Chaque agent marque ses tâches terminées "
-            'via TaskUpdate. L\'agent qualité valide avant de merger."\n\n'
-            "   c) **Si la tâche est simple** (bug fix, petit ajout, modification locale) : "
-            "Ne pas ajouter de stratégie multi-agents, rester en mode agent simple.\n\n"
-            "DIRECTIVES POUR CLAUDE CODE À INCLURE EN FIN D'INSTRUCTION :\n"
-            "- Explore d'abord le code existant en profondeur avant de modifier quoi que ce soit\n"
-            "- Sois rigoureux : vérifie chaque modification, teste les cas limites\n"
-            "- Après implémentation, relis ton propre code et vérifie qu'il n'y a pas de régression\n"
-            "- Si plusieurs approches sont possibles, choisis la plus simple et maintenable\n"
-            "- Ne fais que ce qui est demandé, pas de refactoring non sollicité\n\n"
-            "RÈGLES :\n"
-            "- NE PERDS aucune information technique mentionnée dans la transcription\n"
-            "- Reformule pour être clair et non ambigu, mais garde l'intention exacte du développeur\n"
-            "- Utilise le vocabulaire technique approprié\n"
-            "- N'invente rien qui n'a pas été dit\n"
-            "- CHOISIS la bonne stratégie (simple, frontend-design, ou multi-agents) selon le contexte\n"
-            "- Renvoie UNIQUEMENT l'instruction formatée, sans commentaire ni introduction"
-        ),
-    },
-}
-
-DEFAULT_CONFIG = {
-    "model": "large-v3", "language": "fr", "compute_type": "float16",
-    "gpu_index": "0", "audio_device": "default",
-    "claude_mode": "disabled",
-    "claude_custom_modes": [],
-}
-
-
-# ─── Cross-platform utilities ────────────────────────────────────────────────
-
-def find_existing_instances():
-    """Find PIDs of other superwhisper.py processes (not ourselves)."""
-    my_pid = os.getpid()
-    my_ppid = os.getppid()
-    pids = []
-    if IS_WINDOWS:
-        try:
-            # Get python processes whose commandline contains superwhisper.py
-            out = subprocess.check_output(
-                ["wmic", "process", "where",
-                 "name like '%python%' and commandline like '%superwhisper.py%'",
-                 "get", "processid,commandline"],
-                text=True, stderr=subprocess.DEVNULL)
-            for line in out.strip().split("\n")[1:]:
-                line = line.strip()
-                if not line:
-                    continue
-                # Extract PID (last token on the line)
-                parts = line.rsplit(None, 1)
-                if len(parts) < 2:
-                    continue
-                cmdline, pid_str = parts[0], parts[1]
-                if not pid_str.isdigit():
-                    continue
-                pid = int(pid_str)
-                # Skip ourselves and our parent
-                if pid in (my_pid, my_ppid):
-                    continue
-                # Only match processes running superwhisper.py as a script argument,
-                # not inline -c commands that happen to mention the filename
-                if ' -c ' in cmdline or ' -c"' in cmdline or " -c'" in cmdline:
-                    continue
-                pids.append(pid)
-        except Exception:
-            pass
-    else:
-        try:
-            out = subprocess.check_output(
-                ["pgrep", "-f", "superwhisper.py"], text=True).strip()
-            for line in out.split("\n"):
-                pid = int(line.strip())
-                if pid != my_pid:
-                    pids.append(pid)
-        except (subprocess.CalledProcessError, ValueError):
-            pass
-    return pids
-
-
-def is_already_running():
-    """Check if another instance is running. If so, signal it and return True."""
-    if IS_WINDOWS:
-        # Use a lock file approach on Windows
-        if os.path.exists(PID_FILE):
-            try:
-                with open(PID_FILE) as f:
-                    pid = int(f.read().strip())
-                # Check if process is alive
-                import ctypes
-                kernel32 = ctypes.windll.kernel32
-                handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-                if handle:
-                    kernel32.CloseHandle(handle)
-                    # Process exists — signal it via event
-                    _signal_existing_instance()
-                    return True
-                else:
-                    os.remove(PID_FILE)
-            except (OSError, ValueError):
-                try:
-                    os.remove(PID_FILE)
-                except OSError:
-                    pass
-        others = find_existing_instances()
-        if others:
-            _signal_existing_instance()
-            return True
-        return False
-    else:
-        # Linux: PID file + SIGUSR1
-        if os.path.exists(PID_FILE):
-            try:
-                with open(PID_FILE) as f:
-                    pid = int(f.read().strip())
-                os.kill(pid, 0)
-                os.kill(pid, signal.SIGUSR1)
-                return True
-            except (OSError, ValueError):
-                try:
-                    os.remove(PID_FILE)
-                except OSError:
-                    pass
-        others = find_existing_instances()
-        if others:
-            for pid in others:
-                try:
-                    os.kill(pid, signal.SIGUSR1)
-                    return True
-                except OSError:
-                    continue
-        return False
-
-
-def _signal_existing_instance():
-    """Signal an existing instance to open settings (Windows: named event)."""
-    if IS_WINDOWS:
-        try:
-            import ctypes
-            kernel32 = ctypes.windll.kernel32
-            event = kernel32.OpenEventW(0x2, False, "SuperWhisperCustomShowSettings")
-            if event:
-                kernel32.SetEvent(event)
-                kernel32.CloseHandle(event)
-        except Exception:
-            pass
-
-
-def write_pid():
-    os.makedirs(os.path.dirname(PID_FILE), exist_ok=True)
-    with open(PID_FILE, "w") as f:
-        f.write(str(os.getpid()))
-
-
-def remove_pid():
-    try:
-        os.remove(PID_FILE)
-    except OSError:
-        pass
-
-
-def load_config():
-    if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH) as f:
-            cfg = json.load(f)
-            for k, v in DEFAULT_CONFIG.items():
-                cfg.setdefault(k, v)
-            return cfg
-    return dict(DEFAULT_CONFIG)
-
-
-def save_config(cfg):
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(cfg, f, indent=2)
-
-
-def get_gpu_list():
-    try:
-        out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=index,name,memory.total",
-             "--format=csv,noheader"], text=True,
-            stderr=subprocess.DEVNULL)
-        gpus = []
-        for line in out.strip().split("\n"):
-            parts = [p.strip() for p in line.split(",")]
-            gpus.append((parts[0], f"{parts[1]} ({parts[2]})"))
-        return gpus
-    except Exception:
-        return [("0", "GPU 0")]
-
-
-def get_audio_inputs():
-    """Get audio input devices — cross-platform via sounddevice."""
-    devices = []
-    try:
-        import sounddevice as sd
-        device_list = sd.query_devices()
-        for i, dev in enumerate(device_list):
-            if dev['max_input_channels'] > 0:
-                name = dev['name']
-                devices.append((str(i), name))
-    except Exception:
-        pass
-    if not devices:
-        devices.append(("default", "Par défaut"))
-    return devices
-
-
-def clipboard_copy(text):
-    """Copy text to clipboard — cross-platform."""
-    if IS_LINUX:
-        # Use wl-copy on Wayland (QClipboard is unreliable without focus)
-        try:
-            subprocess.run(
-                ["wl-copy", "--", text],
-                timeout=3, check=True,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return
-        except (FileNotFoundError, subprocess.SubprocessError):
-            pass
-        # Fallback: xclip for X11
-        try:
-            subprocess.run(
-                ["xclip", "-selection", "clipboard"],
-                input=text.encode(), timeout=3, check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return
-        except (FileNotFoundError, subprocess.SubprocessError):
-            pass
-    # Final fallback / Windows: Qt clipboard
-    clipboard = QApplication.clipboard()
-    clipboard.setText(text)
-
-
-def auto_paste():
-    """Simulate Ctrl+V to paste — cross-platform via pynput."""
-    try:
-        time.sleep(0.15)
-        from pynput.keyboard import Controller, Key
-        kb = Controller()
-        ctrl_key = Key.ctrl_l
-        kb.press(ctrl_key)
-        kb.press('v')
-        kb.release('v')
-        kb.release(ctrl_key)
-    except Exception as e:
-        print(f"[SW] auto-paste error: {e}", flush=True)
+MIN_RECORDING_SECONDS = 0.3
+PASTE_DELAY = 0.15
+PASTE_DELAY_AFTER_PICKER = 0.35
 
 
 class Signals(QObject):
     recording_started = Signal()
-    recording_stopped = Signal()
     transcription_started = Signal()
-    reformulation_started = Signal()
-    transcription_done = Signal(str)
+    reformulation_started = Signal(str)
+    picker_requested = Signal(str)
+    transcription_done = Signal(str, bool)
     warning = Signal(str)
     error = Signal(str)
     audio_level = Signal(object)
 
 
-# ─── Audio Recorder (cross-platform via sounddevice) ─────────────────────────
-
-class AudioRecorder:
-    """Records audio using sounddevice (cross-platform)."""
-
-    def __init__(self, signals, device=None):
-        self.signals = signals
-        self.device = device
-        self.recording = False
-        self.frames = []
-        self.stream = None
-
-    def start(self):
-        import sounddevice as sd
-        self.frames = []
-        self.recording = True
-
-        device = None
-        if self.device and self.device != "default":
-            try:
-                device = int(self.device)
-            except ValueError:
-                device = None
-
-        def callback(indata, frame_count, time_info, status):
-            if not self.recording:
-                return
-            samples = indata[:, 0].copy()
-            self.frames.append(samples)
-            fft = np.abs(np.fft.rfft(samples))[:NUM_BARS]
-            mx = fft.max()
-            if mx > 0:
-                fft = fft / mx
-            self.signals.audio_level.emit(fft)
-
-        self.stream = sd.InputStream(
-            samplerate=SAMPLE_RATE, channels=1, dtype='float32',
-            device=device, blocksize=1024, callback=callback)
-        self.stream.start()
-
-    def stop(self):
-        self.recording = False
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
-        if self.frames:
-            return np.concatenate(self.frames)
-        return np.array([], dtype="float32")
-
-
-class Transcriber:
-    def __init__(self):
-        self.model = None
-        self.current_model_name = None
-        self.current_gpu = None
-
-    def load_model(self, config):
-        gpu = config.get("gpu_index", "0")
-        os.environ["CUDA_VISIBLE_DEVICES"] = gpu
-        model_name = config["model"]
-        if self.model and self.current_model_name == model_name and self.current_gpu == gpu:
-            return
-        from faster_whisper import WhisperModel
-        self.model = WhisperModel(
-            model_name, device="cuda",
-            compute_type=config.get("compute_type", "float16"))
-        self.current_model_name = model_name
-        self.current_gpu = gpu
-
-    def transcribe(self, audio, config):
-        if self.model is None:
-            self.load_model(config)
-        lang = config.get("language")
-        segments, _ = self.model.transcribe(
-            audio, language=lang, beam_size=5, vad_filter=True)
-        return " ".join(seg.text.strip() for seg in segments)
-
-
 def create_icon(color, size=64):
     pixmap = QPixmap(QSize(size, size))
     pixmap.fill(Qt.transparent)
-    p = QPainter(pixmap)
-    p.setRenderHint(QPainter.Antialiasing)
-    p.setBrush(QColor(color))
-    p.setPen(Qt.NoPen)
-    p.drawEllipse(8, 8, size - 16, size - 16)
-    p.end()
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setBrush(QColor(color))
+    painter.setPen(Qt.NoPen)
+    painter.drawEllipse(8, 8, size - 16, size - 16)
+    painter.end()
     return QIcon(pixmap)
 
-
-# ─── Settings Dialog ──────────────────────────────────────────────────────────
-
-class SettingsDialog(QDialog):
-    def __init__(self, config, parent=None):
-        super().__init__(parent)
-        self.config = config
-        self.setWindowTitle("SuperWhisper Custom")
-        self.setMinimumWidth(480)
-        self.setStyleSheet("""
-            QDialog { background: #181825; color: #cdd6f4; }
-            QGroupBox {
-                border: 1px solid #313244; border-radius: 10px;
-                margin-top: 14px; padding: 18px 12px 12px 12px;
-                font-weight: bold; color: #a6adc8;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin; left: 14px;
-                padding: 0 6px; color: #89b4fa;
-            }
-            QComboBox {
-                background: #1e1e2e; color: #cdd6f4; border: 1px solid #313244;
-                border-radius: 8px; padding: 8px 14px; min-height: 30px;
-            }
-            QComboBox:hover { border-color: #89b4fa; }
-            QComboBox::drop-down { border: none; width: 24px; }
-            QComboBox QAbstractItemView {
-                background: #1e1e2e; color: #cdd6f4;
-                selection-background-color: #313244; border: 1px solid #313244;
-            }
-            QPushButton {
-                background: #89b4fa; color: #11111b; border: none;
-                border-radius: 10px; padding: 12px 32px;
-                font-weight: bold; font-size: 14px;
-            }
-            QPushButton:hover { background: #b4d0fb; }
-            QPushButton#btn_delete { background: #45475a; color: #cdd6f4; padding: 8px 16px; }
-            QPushButton#btn_delete:hover { background: #585b70; }
-            QPushButton#btn_add { background: #45475a; color: #cdd6f4; padding: 8px 16px; }
-            QPushButton#btn_add:hover { background: #585b70; }
-            QLabel { color: #a6adc8; }
-            QPlainTextEdit {
-                background: #1e1e2e; color: #cdd6f4; border: 1px solid #313244;
-                border-radius: 8px; padding: 8px; font-size: 12px;
-            }
-            QPlainTextEdit:focus { border-color: #89b4fa; }
-            QPlainTextEdit[readOnly="true"] { color: #a6adc8; }
-            QLineEdit {
-                background: #1e1e2e; color: #cdd6f4; border: 1px solid #313244;
-                border-radius: 8px; padding: 8px 14px; min-height: 30px;
-            }
-            QLineEdit:focus { border-color: #89b4fa; }
-        """)
-
-        layout = QVBoxLayout(self)
-        layout.setSpacing(16)
-        layout.setContentsMargins(24, 20, 24, 20)
-
-        title = QLabel("SuperWhisper Custom")
-        title.setFont(QFont("Sans", 20, QFont.Bold))
-        title.setStyleSheet("color: #cdd6f4;")
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
-
-        sub = QLabel("Ctrl + Alt + Space pour enregistrer")
-        sub.setStyleSheet("color: #585b70; font-size: 12px;")
-        sub.setAlignment(Qt.AlignCenter)
-        layout.addWidget(sub)
-
-        # Model
-        mg = QGroupBox("Transcription")
-        ml = QFormLayout(mg)
-        ml.setSpacing(10)
-
-        self.model_combo = QComboBox()
-        for m in AVAILABLE_MODELS:
-            self.model_combo.addItem(m, m)
-        idx = AVAILABLE_MODELS.index(config["model"]) if config["model"] in AVAILABLE_MODELS else 0
-        self.model_combo.setCurrentIndex(idx)
-        ml.addRow("Modèle :", self.model_combo)
-
-        self.lang_combo = QComboBox()
-        for name, code in AVAILABLE_LANGUAGES:
-            self.lang_combo.addItem(name, code)
-        for i, (_, code) in enumerate(AVAILABLE_LANGUAGES):
-            if code == config.get("language"):
-                self.lang_combo.setCurrentIndex(i)
-                break
-        ml.addRow("Langue :", self.lang_combo)
-
-        self.compute_combo = QComboBox()
-        self.compute_combo.addItem("float16 — rapide", "float16")
-        self.compute_combo.addItem("int8 — léger", "int8")
-        if config.get("compute_type") == "int8":
-            self.compute_combo.setCurrentIndex(1)
-        ml.addRow("Précision :", self.compute_combo)
-        layout.addWidget(mg)
-
-        # Hardware
-        hg = QGroupBox("Matériel")
-        hl = QFormLayout(hg)
-        hl.setSpacing(10)
-
-        self.gpu_combo = QComboBox()
-        for gid, gname in get_gpu_list():
-            self.gpu_combo.addItem(f"GPU {gid} — {gname}", gid)
-        for i in range(self.gpu_combo.count()):
-            if self.gpu_combo.itemData(i) == config.get("gpu_index", "0"):
-                self.gpu_combo.setCurrentIndex(i)
-                break
-        hl.addRow("GPU :", self.gpu_combo)
-
-        self.audio_combo = QComboBox()
-        for aid, aname in get_audio_inputs():
-            self.audio_combo.addItem(aname, aid)
-        for i in range(self.audio_combo.count()):
-            if self.audio_combo.itemData(i) == config.get("audio_device"):
-                self.audio_combo.setCurrentIndex(i)
-                break
-        hl.addRow("Microphone :", self.audio_combo)
-        layout.addWidget(hg)
-
-        # Claude post-processing
-        cg = QGroupBox("Post-traitement Claude")
-        cvl = QVBoxLayout(cg)
-        cvl.setSpacing(10)
-        cl = QFormLayout()
-        cl.setSpacing(10)
-
-        self.claude_combo = QComboBox()
-        self._rebuild_claude_combo()
-        self.claude_combo.currentIndexChanged.connect(self._on_claude_mode_changed)
-        cl.addRow("Mode :", self.claude_combo)
-        cvl.addLayout(cl)
-
-        self.prompt_label = QLabel("Prompt :")
-        self.prompt_label.setStyleSheet("color: #a6adc8; font-size: 12px;")
-        cvl.addWidget(self.prompt_label)
-
-        self.prompt_edit = QPlainTextEdit()
-        self.prompt_edit.setMaximumHeight(120)
-        cvl.addWidget(self.prompt_edit)
-
-        btn_row = QHBoxLayout()
-        self.btn_add_mode = QPushButton("+ Ajouter un mode")
-        self.btn_add_mode.setObjectName("btn_add")
-        self.btn_add_mode.clicked.connect(self._add_custom_mode)
-        btn_row.addWidget(self.btn_add_mode)
-
-        self.btn_reset_prompt = QPushButton("Réinitialiser")
-        self.btn_reset_prompt.setObjectName("btn_delete")
-        self.btn_reset_prompt.clicked.connect(self._reset_prompt)
-        btn_row.addWidget(self.btn_reset_prompt)
-
-        self.btn_del_mode = QPushButton("Supprimer")
-        self.btn_del_mode.setObjectName("btn_delete")
-        self.btn_del_mode.clicked.connect(self._del_custom_mode)
-        btn_row.addWidget(self.btn_del_mode)
-        btn_row.addStretch()
-        cvl.addLayout(btn_row)
-
-        layout.addWidget(cg)
-        self._on_claude_mode_changed()
-
-        btn = QPushButton("Sauvegarder")
-        btn.clicked.connect(self._save)
-        layout.addWidget(btn)
-
-    def _rebuild_claude_combo(self):
-        self.claude_combo.blockSignals(True)
-        self.claude_combo.clear()
-        self.claude_combo.addItem("Désactivé", "disabled")
-        for mode_id, info in CLAUDE_BUILTIN_MODES.items():
-            self.claude_combo.addItem(info["name"], mode_id)
-        for cm in self.config.get("claude_custom_modes", []):
-            self.claude_combo.addItem(cm["name"], f"custom:{cm['name']}")
-        current = self.config.get("claude_mode", "disabled")
-        for i in range(self.claude_combo.count()):
-            if self.claude_combo.itemData(i) == current:
-                self.claude_combo.setCurrentIndex(i)
-                break
-        self.claude_combo.blockSignals(False)
-
-    def _on_claude_mode_changed(self):
-        mode = self.claude_combo.currentData()
-        if mode == "disabled":
-            self.prompt_label.hide()
-            self.prompt_edit.hide()
-            self.btn_del_mode.hide()
-            self.btn_reset_prompt.hide()
-        elif mode in CLAUDE_BUILTIN_MODES:
-            self.prompt_label.show()
-            self.prompt_edit.show()
-            self.prompt_edit.setReadOnly(False)
-            overrides = self.config.get("claude_prompt_overrides", {})
-            if mode in overrides:
-                self.prompt_edit.setPlainText(overrides[mode])
-            else:
-                self.prompt_edit.setPlainText(CLAUDE_BUILTIN_MODES[mode]["prompt"])
-            self.btn_del_mode.hide()
-            self.btn_reset_prompt.show()
-        elif mode and mode.startswith("custom:"):
-            name = mode[len("custom:"):]
-            self.prompt_label.show()
-            self.prompt_edit.show()
-            self.prompt_edit.setReadOnly(False)
-            for cm in self.config.get("claude_custom_modes", []):
-                if cm["name"] == name:
-                    self.prompt_edit.setPlainText(cm["prompt"])
-                    break
-            self.btn_del_mode.show()
-            self.btn_reset_prompt.hide()
-
-    def _add_custom_mode(self):
-        name, ok = QInputDialog.getText(
-            self, "Nouveau mode", "Nom du mode :",
-            text="Mon mode")
-        if not ok or not name.strip():
-            return
-        name = name.strip()
-        custom = self.config.get("claude_custom_modes", [])
-        if any(cm["name"] == name for cm in custom):
-            return
-        custom.append({"name": name, "prompt": ""})
-        self.config["claude_custom_modes"] = custom
-        self._rebuild_claude_combo()
-        for i in range(self.claude_combo.count()):
-            if self.claude_combo.itemData(i) == f"custom:{name}":
-                self.claude_combo.setCurrentIndex(i)
-                break
-        self._on_claude_mode_changed()
-
-    def _reset_prompt(self):
-        mode = self.claude_combo.currentData()
-        if mode in CLAUDE_BUILTIN_MODES:
-            self.prompt_edit.setPlainText(CLAUDE_BUILTIN_MODES[mode]["prompt"])
-            overrides = self.config.get("claude_prompt_overrides", {})
-            overrides.pop(mode, None)
-            self.config["claude_prompt_overrides"] = overrides
-
-    def _del_custom_mode(self):
-        mode = self.claude_combo.currentData()
-        if not mode or not mode.startswith("custom:"):
-            return
-        name = mode[len("custom:"):]
-        custom = self.config.get("claude_custom_modes", [])
-        self.config["claude_custom_modes"] = [
-            cm for cm in custom if cm["name"] != name]
-        self.config["claude_mode"] = "disabled"
-        self._rebuild_claude_combo()
-        self._on_claude_mode_changed()
-
-    def _save(self):
-        self.config["model"] = self.model_combo.currentData()
-        self.config["language"] = self.lang_combo.currentData()
-        self.config["compute_type"] = self.compute_combo.currentData()
-        self.config["gpu_index"] = self.gpu_combo.currentData()
-        self.config["audio_device"] = self.audio_combo.currentData()
-        mode = self.claude_combo.currentData()
-        self.config["claude_mode"] = mode if mode else "disabled"
-        if mode in CLAUDE_BUILTIN_MODES:
-            current_prompt = self.prompt_edit.toPlainText()
-            overrides = self.config.get("claude_prompt_overrides", {})
-            if current_prompt != CLAUDE_BUILTIN_MODES[mode]["prompt"]:
-                overrides[mode] = current_prompt
-            else:
-                overrides.pop(mode, None)
-            self.config["claude_prompt_overrides"] = overrides
-        elif mode and mode.startswith("custom:"):
-            name = mode[len("custom:"):]
-            for cm in self.config.get("claude_custom_modes", []):
-                if cm["name"] == name:
-                    cm["prompt"] = self.prompt_edit.toPlainText()
-                    break
-        save_config(self.config)
-        self.accept()
-
-
-# ─── Spectrum Widget ──────────────────────────────────────────────────────────
-
-class SpectrumWidget(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.smooth_bars = np.zeros(NUM_BARS)
-        self.velocity = np.zeros(NUM_BARS)
-        self.peak_bars = np.zeros(NUM_BARS)
-        self.peak_decay = np.zeros(NUM_BARS)
-        self.setMinimumHeight(70)
-        self.setMinimumWidth(360)
-        self._anim_timer = QTimer(self)
-        self._anim_timer.timeout.connect(self._decay)
-        self._anim_timer.setInterval(16)
-
-    def update_bars(self, fft_data):
-        target = np.zeros(NUM_BARS)
-        n = min(len(fft_data), NUM_BARS)
-        target[:n] = fft_data[:n]
-        diff = target - self.smooth_bars
-        self.velocity = self.velocity * 0.6 + diff * 0.4
-        self.smooth_bars = np.clip(self.smooth_bars + self.velocity, 0, 1)
-        higher = self.smooth_bars > self.peak_bars
-        self.peak_bars[higher] = self.smooth_bars[higher]
-        self.peak_decay[higher] = 0
-        if not self._anim_timer.isActive():
-            self._anim_timer.start()
-        self.update()
-
-    def _decay(self):
-        self.peak_decay += 0.02
-        self.peak_bars = np.maximum(self.peak_bars - self.peak_decay * 0.04, 0)
-        if np.max(self.smooth_bars) < 0.005 and np.max(self.peak_bars) < 0.005:
-            self._anim_timer.stop()
-        self.update()
-
-    def reset(self):
-        self.smooth_bars = np.zeros(NUM_BARS)
-        self.velocity = np.zeros(NUM_BARS)
-        self.peak_bars = np.zeros(NUM_BARS)
-        self.peak_decay = np.zeros(NUM_BARS)
-        self._anim_timer.stop()
-        self.update()
-
-    def paintEvent(self, event):
-        from PySide6.QtGui import QLinearGradient
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        w, h = self.width(), self.height()
-        bar_w = max(3, (w - (NUM_BARS - 1) * 2) // NUM_BARS)
-        gap = 2
-        total = NUM_BARS * bar_w + (NUM_BARS - 1) * gap
-        ox = (w - total) // 2
-        cy = h // 2
-
-        for i in range(NUM_BARS):
-            val = self.smooth_bars[i]
-            half_h = max(2, int(val * cy * 0.92))
-            x = ox + i * (bar_w + gap)
-
-            t = i / max(NUM_BARS - 1, 1)
-            center_weight = 1.0 - abs(t - 0.5) * 2.0
-            intensity = 0.6 + center_weight * 0.4
-
-            r = int((137 * (1 - t) + 203 * t) * intensity)
-            g = int((180 * (1 - t) + 166 * t) * intensity)
-            b = int((250 * (1 - t) + 250 * t) * intensity)
-            alpha = int(140 + val * 100)
-
-            grad = QLinearGradient(x, cy - half_h, x, cy + half_h)
-            grad.setColorAt(0.0, QColor(r, g, b, int(alpha * 0.4)))
-            grad.setColorAt(0.35, QColor(r, g, b, alpha))
-            grad.setColorAt(0.5, QColor(min(r + 40, 255), min(g + 40, 255), min(b + 20, 255), alpha))
-            grad.setColorAt(0.65, QColor(r, g, b, alpha))
-            grad.setColorAt(1.0, QColor(r, g, b, int(alpha * 0.4)))
-
-            p.setPen(Qt.NoPen)
-            p.setBrush(grad)
-            p.drawRoundedRect(x, cy - half_h, bar_w, half_h * 2, bar_w // 2, bar_w // 2)
-
-            peak_val = self.peak_bars[i]
-            if peak_val > 0.05:
-                peak_h = int(peak_val * cy * 0.92)
-                dot_size = bar_w
-                p.setBrush(QColor(r, g, b, 90))
-                p.drawEllipse(x, cy - peak_h - dot_size // 2, dot_size, dot_size)
-                p.drawEllipse(x, cy + peak_h - dot_size // 2, dot_size, dot_size)
-        p.end()
-
-
-# ─── Overlay ──────────────────────────────────────────────────────────────────
-
-class Overlay(QWidget):
-    def __init__(self):
-        super().__init__()
-        flags = Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
-        if not IS_WINDOWS:
-            flags |= Qt.WindowTransparentForInput
-        self.setWindowFlags(flags)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
-        self.setWindowTitle("SuperWhisper Overlay")
-        self.setFixedSize(480, 110)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        self.container = QWidget()
-        self.container.setStyleSheet(
-            "background-color: rgba(17,17,27,230); border-radius: 22px;")
-        cl = QVBoxLayout(self.container)
-        cl.setContentsMargins(24, 12, 24, 12)
-        cl.setSpacing(6)
-
-        self.label = QLabel()
-        self.label.setAlignment(Qt.AlignCenter)
-        self.label.setFont(QFont("Sans", 11, QFont.DemiBold))
-        self.label.setStyleSheet("background: transparent; color: #585b70;")
-        cl.addWidget(self.label)
-
-        self.spectrum = SpectrumWidget()
-        self.spectrum.setStyleSheet("background: transparent;")
-        cl.addWidget(self.spectrum)
-
-        layout.addWidget(self.container)
-
-        self._opacity = QGraphicsOpacityEffect(self)
-        self.setGraphicsEffect(self._opacity)
-        self._opacity.setOpacity(1.0)
-
-        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
-        self._fade_anim = QPropertyAnimation(self._opacity, b"opacity")
-        self._fade_anim.setDuration(350)
-        self._fade_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-
-        self._hide_timer = QTimer(self)
-        self._hide_timer.setSingleShot(True)
-        self._hide_timer.timeout.connect(self._fade_out)
-
-        # Keep-on-top workaround (Linux KWin/Wayland only)
-        self._raise_timer = QTimer(self)
-        self._raise_timer.setSingleShot(True)
-        self._raise_timer.timeout.connect(self._ensure_on_top)
-
-        self._state = "idle"
-
-    def _center(self):
-        s = QApplication.primaryScreen().geometry()
-        self.move((s.width() - self.width()) // 2, int(s.height() * 0.08))
-
-    def _ensure_on_top(self):
-        """Force keepAbove — KWin scripting on Linux, no-op on Windows (Qt handles it)."""
-        if not self.isVisible():
-            return
-        if IS_WINDOWS:
-            # Qt.WindowStaysOnTopHint is enough on Windows
-            return
-        # Linux KWin workaround
-        import tempfile
-        script = 'workspace.windowList().forEach(function(w){if(w.caption==="SuperWhisper Overlay")w.keepAbove=true;});'
-        try:
-            with tempfile.NamedTemporaryFile(
-                    mode='w', suffix='.js', delete=False, dir='/tmp',
-                    prefix='sw_keepabove_') as f:
-                f.write(script)
-                path = f.name
-            r = subprocess.run(
-                ["qdbus", "org.kde.KWin", "/Scripting",
-                 "org.kde.kwin.Scripting.loadScript", path,
-                 "superwhisper-keepabove"],
-                capture_output=True, text=True, timeout=2)
-            if r.returncode == 0:
-                subprocess.run(
-                    ["qdbus", "org.kde.KWin", "/Scripting",
-                     "org.kde.kwin.Scripting.start"],
-                    capture_output=True, text=True, timeout=2)
-                subprocess.run(
-                    ["qdbus", "org.kde.KWin", "/Scripting",
-                     "org.kde.kwin.Scripting.unloadScript",
-                     "superwhisper-keepabove"],
-                    capture_output=True, text=True, timeout=2)
-            os.unlink(path)
-        except Exception as e:
-            print(f"[SW] KWin keepAbove error: {e}", flush=True)
-
-    def _fade_in(self):
-        self._fade_anim.stop()
-        self._fade_anim.setStartValue(self._opacity.opacity())
-        self._fade_anim.setEndValue(1.0)
-        self._fade_anim.start()
-
-    def _fade_out(self):
-        self._fade_anim.stop()
-        self._fade_anim.setStartValue(self._opacity.opacity())
-        self._fade_anim.setEndValue(0.0)
-        self._fade_anim.finished.connect(self._on_fade_out_done)
-        self._fade_anim.start()
-
-    def _on_fade_out_done(self):
-        try:
-            self._fade_anim.finished.disconnect(self._on_fade_out_done)
-        except RuntimeError:
-            pass
-        self.hide()
-        self._opacity.setOpacity(1.0)
-
-    def show_recording(self):
-        self._state = "recording"
-        self.setFixedSize(480, 110)
-        self.label.setText("  Enregistrement...")
-        self.label.setStyleSheet("background: transparent; color: #bac2de;")
-        self.container.setStyleSheet(
-            "background-color: rgba(17,17,27,230); border-radius:22px;"
-            "border: 1.5px solid rgba(205,214,244,40);")
-        self.spectrum.show()
-        self.spectrum.reset()
-        self._hide_timer.stop()
-        self._center()
-        self.show()
-        self._raise_timer.start(200)
-        self._fade_in()
-
-    def update_spectrum(self, fft_data):
-        self.spectrum.update_bars(fft_data)
-
-    def show_transcribing(self):
-        self._state = "transcribing"
-        self.label.setText("  Transcription...")
-        self.label.setStyleSheet("background: transparent; color: #89b4fa;")
-        self.container.setStyleSheet(
-            "background-color: rgba(17,17,27,230); border-radius:22px;"
-            "border: 1.5px solid rgba(137,180,250,50);")
-        self.spectrum.hide()
-        self.setFixedSize(480, 50)
-        self._center()
-        self.show()
-        self._raise_timer.start(200)
-
-    def show_reformulating(self):
-        self._state = "reformulating"
-        self.label.setText("  Reformulation Claude...")
-        self.label.setStyleSheet("background: transparent; color: #cba6f7;")
-        self.container.setStyleSheet(
-            "background-color: rgba(17,17,27,230); border-radius:22px;"
-            "border: 1.5px solid rgba(203,166,247,50);")
-        self.spectrum.hide()
-        self.setFixedSize(480, 50)
-        self._center()
-        self.show()
-        self._raise_timer.start(200)
-
-    def show_done(self):
-        self._state = "idle"
-        self.label.setText("  Copié")
-        self.label.setStyleSheet("background: transparent; color: #a6e3a1;")
-        self.container.setStyleSheet(
-            "background-color: rgba(17,17,27,230); border-radius:22px;"
-            "border: 1.5px solid rgba(166,227,161,50);")
-        self.spectrum.hide()
-        self.setFixedSize(480, 50)
-        self._center()
-        self.show()
-        self._raise_timer.start(200)
-        self._hide_timer.start(1000)
-
-    def show_warning(self, text):
-        self._state = "idle"
-        self.label.setText(f"  {text}")
-        self.label.setStyleSheet("background: transparent; color: #fab387;")
-        self.container.setStyleSheet(
-            "background-color: rgba(17,17,27,230); border-radius:22px;"
-            "border: 1.5px solid rgba(250,179,135,50);")
-        self.spectrum.hide()
-        self.setFixedSize(480, 50)
-        self._center()
-        self.show()
-        self._raise_timer.start(200)
-        self._hide_timer.start(3000)
-
-    def show_error(self, text):
-        self._state = "idle"
-        self.label.setText(f"  {text}")
-        self.label.setStyleSheet("background: transparent; color: #f38ba8;")
-        self.container.setStyleSheet(
-            "background-color: rgba(17,17,27,230); border-radius:22px;"
-            "border: 1.5px solid rgba(243,139,168,50);")
-        self.spectrum.hide()
-        self.setFixedSize(480, 50)
-        self._center()
-        self.show()
-        self._hide_timer.start(2500)
-
-
-# ─── Main App ─────────────────────────────────────────────────────────────────
 
 class SuperWhisper(QObject):
     _open_settings_signal = Signal()
@@ -1085,266 +74,369 @@ class SuperWhisper(QObject):
         self.app.setQuitOnLastWindowClosed(False)
         self.app.setApplicationName("SuperWhisper Custom")
 
-        self.config = load_config()
+        config_module.migrate_file()
+        self.config = config_module.load_config()
         os.environ["CUDA_VISIBLE_DEVICES"] = self.config.get("gpu_index", "0")
 
         self.signals = Signals()
         self.recorder = AudioRecorder(self.signals, self.config.get("audio_device", "default"))
         self.transcriber = Transcriber()
         self.is_recording = False
+        self.is_processing = False
+        self.last_activity = time.monotonic()
 
         self.overlay = Overlay()
+        self._build_tray()
+        self._connect_signals()
 
-        self.tray = QSystemTrayIcon()
-        self.icon_idle = create_icon("#a6e3a1")
-        self.icon_rec = create_icon("#f38ba8")
-        self.icon_work = create_icon("#89b4fa")
-        self.tray.setIcon(self.icon_idle)
-        self.tray.setToolTip("SuperWhisper — Ctrl+Alt+Space")
-
-        menu = QMenu()
-        sa = QAction("Paramètres", menu)
-        sa.triggered.connect(self._open_settings)
-        menu.addAction(sa)
-        menu.addSeparator()
-        qa = QAction("Quitter", menu)
-        qa.triggered.connect(self._quit)
-        menu.addAction(qa)
-        self.tray.setContextMenu(menu)
-        self.tray.activated.connect(self._tray_activated)
-        self.tray.show()
-
-        self.signals.recording_started.connect(self._on_rec_start)
-        self.signals.recording_stopped.connect(lambda: None)
-        self.signals.transcription_started.connect(self._on_trans_start)
-        self.signals.reformulation_started.connect(self._on_reform_start)
-        self.signals.transcription_done.connect(self._on_trans_done)
-        self.signals.warning.connect(self._on_warning)
-        self.signals.error.connect(self._on_error)
-        self.signals.audio_level.connect(self._on_audio)
-
-        # Cross-thread signal for opening settings
-        self._open_settings_signal.connect(self._open_settings)
-
-        # Single-instance handling
-        write_pid()
+        instance.write_pid()
         if IS_WINDOWS:
             self._setup_windows_ipc()
         else:
             self._setup_linux_ipc()
 
-        if not os.path.exists(CONFIG_PATH):
+        if not os.path.exists(config_module.CONFIG_PATH):
             QTimer.singleShot(500, self._open_settings)
+
+        self._idle_timer = QTimer(self)
+        self._idle_timer.timeout.connect(self._check_idle)
+        self._idle_timer.start(60_000)
 
         threading.Thread(target=self._preload, daemon=True).start()
         threading.Thread(target=self._hotkey_listener, daemon=True).start()
 
-    def _setup_linux_ipc(self):
-        """Set up SIGUSR1 handler for single-instance settings open."""
-        self._sigusr_notifier_r, self._sigusr_notifier_w = os.pipe()
-        signal.signal(signal.SIGUSR1, lambda *_: os.write(self._sigusr_notifier_w, b'\x00'))
-        from PySide6.QtCore import QSocketNotifier
-        self._sock_notifier = QSocketNotifier(self._sigusr_notifier_r, QSocketNotifier.Type.Read)
-        self._sock_notifier.activated.connect(self._on_sigusr1)
+    # ─── Barre système ───────────────────────────────────────────────────────
 
-    def _setup_windows_ipc(self):
-        """Set up Windows named event for single-instance settings open."""
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        self._win_event = kernel32.CreateEventW(None, False, False, "SuperWhisperCustomShowSettings")
-        # Poll the event periodically
-        self._win_event_timer = QTimer(self)
-        self._win_event_timer.timeout.connect(self._check_windows_event)
-        self._win_event_timer.start(500)
+    def _build_tray(self):
+        self.tray = QSystemTrayIcon()
+        self.icon_idle = create_icon("#a6e3a1")
+        self.icon_recording = create_icon("#f38ba8")
+        self.icon_working = create_icon("#89b4fa")
+        self.tray.setIcon(self.icon_idle)
+        self.tray.activated.connect(self._tray_activated)
+        self.menu = QMenu()
+        self._rebuild_tray_menu()
+        self.tray.setContextMenu(self.menu)
+        self.tray.show()
 
-    def _check_windows_event(self):
-        """Check if another instance signaled us to open settings."""
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        # WaitForSingleObject with 0 timeout = non-blocking check
-        result = kernel32.WaitForSingleObject(self._win_event, 0)
-        if result == 0:  # WAIT_OBJECT_0 = signaled
-            self._open_settings()
+    def _rebuild_tray_menu(self):
+        self.menu.clear()
 
-    def _on_sigusr1(self):
-        os.read(self._sigusr_notifier_r, 1)
-        self._open_settings()
+        settings_action = QAction("Paramètres", self.menu)
+        settings_action.triggered.connect(self._open_settings)
+        self.menu.addAction(settings_action)
+        self.menu.addSeparator()
 
-    def _preload(self):
-        try:
-            self.transcriber.load_model(self.config)
-        except Exception as e:
-            self.signals.error.emit(f"Erreur modèle: {e}")
+        format_menu = self.menu.addMenu("Format par défaut")
+        self._format_group = QActionGroup(self.menu)
+        self._format_group.setExclusive(True)
+        current_mode = self.config.get("reformat_mode", presets.DISABLED)
+        for label, mode_id in presets.list_modes(self.config):
+            action = QAction(label, self.menu, checkable=True)
+            action.setChecked(mode_id == current_mode)
+            action.triggered.connect(lambda _checked, m=mode_id: self._set_default_mode(m))
+            self._format_group.addAction(action)
+            format_menu.addAction(action)
+
+        language_menu = self.menu.addMenu("Langue de sortie")
+        self._language_group = QActionGroup(self.menu)
+        self._language_group.setExclusive(True)
+        current_language = self.config.get("target_language", "none")
+        for label, code in presets.LANGUAGES:
+            action = QAction(label, self.menu, checkable=True)
+            action.setChecked(code == current_language)
+            action.triggered.connect(lambda _checked, c=code: self._set_target_language(c))
+            self._language_group.addAction(action)
+            language_menu.addAction(action)
+
+        self.menu.addSeparator()
+        quit_action = QAction("Quitter", self.menu)
+        quit_action.triggered.connect(self._quit)
+        self.menu.addAction(quit_action)
+        self._update_tooltip()
+
+    def _update_tooltip(self):
+        mode = presets.mode_label(self.config, self.config.get("reformat_mode"))
+        language = self.config.get("target_language", "none")
+        suffix = "" if language in (None, "none") else f" → {presets.language_label(language)}"
+        self.tray.setToolTip(f"SuperWhisper — Ctrl+Alt+Espace · {mode}{suffix}")
+
+    def _set_default_mode(self, mode):
+        self.config["reformat_mode"] = mode
+        config_module.save_config(self.config)
+        self._update_tooltip()
+        threading.Thread(target=self._warm_up_backend, daemon=True).start()
+
+    def _set_target_language(self, code):
+        self.config["target_language"] = code
+        config_module.save_config(self.config)
+        self._update_tooltip()
 
     def _tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self._open_settings()
 
+    # ─── Signaux ─────────────────────────────────────────────────────────────
+
+    def _connect_signals(self):
+        self.signals.recording_started.connect(self._on_recording_started)
+        self.signals.transcription_started.connect(self._on_transcription_started)
+        self.signals.reformulation_started.connect(self._on_reformulation_started)
+        self.signals.picker_requested.connect(self._on_picker_requested)
+        self.signals.transcription_done.connect(self._on_transcription_done)
+        self.signals.warning.connect(self._on_warning)
+        self.signals.error.connect(self._on_error)
+        self.signals.audio_level.connect(self.overlay.update_spectrum)
+        self._open_settings_signal.connect(self._open_settings)
+
+    def _setup_linux_ipc(self):
+        self._sigusr_read, self._sigusr_write = os.pipe()
+        signal.signal(signal.SIGUSR1, lambda *_: os.write(self._sigusr_write, b"\x00"))
+        from PySide6.QtCore import QSocketNotifier
+        self._notifier = QSocketNotifier(self._sigusr_read, QSocketNotifier.Type.Read)
+        self._notifier.activated.connect(self._on_sigusr1)
+
+    def _on_sigusr1(self):
+        os.read(self._sigusr_read, 1)
+        self._open_settings()
+
+    def _setup_windows_ipc(self):
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        self._win_event = kernel32.CreateEventW(None, False, False, instance.WINDOWS_EVENT_NAME)
+        self._win_timer = QTimer(self)
+        self._win_timer.timeout.connect(self._check_windows_event)
+        self._win_timer.start(500)
+
+    def _check_windows_event(self):
+        import ctypes
+        if ctypes.windll.kernel32.WaitForSingleObject(self._win_event, 0) == 0:
+            self._open_settings()
+
+    # ─── Chargement et veille ────────────────────────────────────────────────
+
+    def _preload(self):
+        try:
+            self.transcriber.load_model(self.config)
+        except Exception as exc:
+            self.signals.error.emit(f"Erreur modèle : {exc}")
+        self._warm_up_backend()
+
+    def _warm_up_backend(self):
+        """Précharge le modèle de reformulation si un format est actif."""
+        mode = self.config.get("reformat_mode", presets.DISABLED)
+        translating = presets.is_translating(self.config.get("target_language"))
+        if mode == presets.DISABLED and not translating:
+            return
+        if presets.mode_backend(self.config, mode) != "ollama":
+            return
+        backends.OllamaBackend.from_config(self.config).warm_up()
+
+    def _check_idle(self):
+        minutes = int(self.config.get("whisper_idle_unload_min", 0) or 0)
+        if minutes <= 0 or self.is_recording or self.is_processing:
+            return
+        if not self.transcriber.is_loaded:
+            return
+        if time.monotonic() - self.last_activity >= minutes * 60:
+            self.transcriber.unload()
+
+    # ─── Réglages ────────────────────────────────────────────────────────────
+
     def _open_settings(self):
-        dlg = SettingsDialog(dict(self.config))
-        if dlg.exec() == QDialog.Accepted:
-            old = (self.config.get("model"), self.config.get("gpu_index"))
-            self.config = load_config()
-            os.environ["CUDA_VISIBLE_DEVICES"] = self.config.get("gpu_index", "0")
-            self.recorder.device = self.config.get("audio_device", "default")
-            if (self.config["model"], self.config["gpu_index"]) != old:
-                self.transcriber.model = None
-                threading.Thread(target=self._preload, daemon=True).start()
+        previous = (self.config.get("model"), self.config.get("gpu_index"),
+                    self.config.get("compute_type"))
+        previous_llm = self.config.get("ollama_model")
+
+        dialog = SettingsDialog(dict(self.config))
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        self.config = config_module.load_config()
+        os.environ["CUDA_VISIBLE_DEVICES"] = self.config.get("gpu_index", "0")
+        self.recorder.device = self.config.get("audio_device", "default")
+        self._rebuild_tray_menu()
+
+        current = (self.config.get("model"), self.config.get("gpu_index"),
+                   self.config.get("compute_type"))
+        if current != previous:
+            self.transcriber.unload()
+            threading.Thread(target=self._preload, daemon=True).start()
+        elif self.config.get("ollama_model") != previous_llm:
+            threading.Thread(target=self._warm_up_backend, daemon=True).start()
+
+    # ─── Raccourcis ──────────────────────────────────────────────────────────
 
     def _hotkey_listener(self):
-        """Listen for Ctrl+Alt+Space via pynput with auto-restart on crash."""
         from pynput import keyboard
-        ctrl = False
-        alt = False
+        pressed = {"ctrl": False, "alt": False, "shift": False}
 
         def on_press(key):
-            nonlocal ctrl, alt
             if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-                ctrl = True
-            elif key in (keyboard.Key.alt_l, keyboard.Key.alt_r):
-                alt = True
-            elif key == keyboard.Key.space and ctrl and alt:
-                self._toggle()
+                pressed["ctrl"] = True
+            elif key in (keyboard.Key.alt_l, keyboard.Key.alt_r, keyboard.Key.alt_gr):
+                pressed["alt"] = True
+            elif key in (keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r):
+                pressed["shift"] = True
+            elif key == keyboard.Key.space and pressed["ctrl"] and pressed["alt"]:
+                self._toggle(pick=pressed["shift"])
 
         def on_release(key):
-            nonlocal ctrl, alt
             if key in (keyboard.Key.ctrl_l, keyboard.Key.ctrl_r):
-                ctrl = False
-            elif key in (keyboard.Key.alt_l, keyboard.Key.alt_r):
-                alt = False
+                pressed["ctrl"] = False
+            elif key in (keyboard.Key.alt_l, keyboard.Key.alt_r, keyboard.Key.alt_gr):
+                pressed["alt"] = False
+            elif key in (keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r):
+                pressed["shift"] = False
 
-        print("[SW] Hotkey listener (pynput) started", flush=True)
+        log("écoute du raccourci (pynput) démarrée")
         while True:
             try:
-                with keyboard.Listener(on_press=on_press, on_release=on_release) as l:
-                    l.join()
-            except Exception as e:
-                print(f"[SW] pynput listener crashed ({e}), restarting in 2s", flush=True)
+                with keyboard.Listener(on_press=on_press, on_release=on_release) as listener:
+                    listener.join()
+            except Exception as exc:
+                log(f"pynput a planté ({exc}), redémarrage dans 2 s")
                 time.sleep(2)
 
-    def _toggle(self):
+    def _toggle(self, pick=False):
+        self.last_activity = time.monotonic()
         if not self.is_recording:
             self.is_recording = True
-            self.recorder.start()
+            try:
+                self.recorder.start()
+            except Exception as exc:
+                self.is_recording = False
+                log(f"enregistrement impossible : {exc}")
+                self.signals.error.emit("Micro indisponible")
+                return
             self.signals.recording_started.emit()
-            print(f"[SW] Recording started — device={self.recorder.device}", flush=True)
-        else:
-            self.is_recording = False
-            audio = self.recorder.stop()
-            self.signals.recording_stopped.emit()
-            print(f"[SW] Recording stopped — {len(audio)} samples ({len(audio)/SAMPLE_RATE:.1f}s)", flush=True)
-            if len(audio) < SAMPLE_RATE * 0.3:
-                self.signals.error.emit("Trop court")
-                return
-            self.signals.transcription_started.emit()
-            threading.Thread(target=self._transcribe, args=(audio,), daemon=True).start()
+            log(f"enregistrement démarré — micro={self.recorder.device}")
+            return
 
-    def _transcribe(self, audio):
+        self.is_recording = False
+        audio = self.recorder.stop()
+        duration = len(audio) / SAMPLE_RATE
+        log(f"enregistrement arrêté — {len(audio)} échantillons ({duration:.1f} s)")
+        if duration < MIN_RECORDING_SECONDS:
+            self.signals.error.emit("Trop court")
+            return
+        self.is_processing = True
+        self.signals.transcription_started.emit()
+        threading.Thread(target=self._transcribe, args=(audio, pick), daemon=True).start()
+
+    # ─── Chaîne de traitement ────────────────────────────────────────────────
+
+    def _transcribe(self, audio, pick):
         try:
-            print(f"[SW] Transcribing {len(audio)/SAMPLE_RATE:.1f}s audio...", flush=True)
-            text = self.transcriber.transcribe(audio, self.config)
-            if not text.strip():
-                print("[SW] No text detected", flush=True)
-                self.signals.error.emit("Aucun texte détecté")
-                return
-            text = text.strip()
-            print(f"[SW] Result: {text[:80]}", flush=True)
-            mode = self.config.get("claude_mode", "disabled")
-            if mode != "disabled":
-                prompt = self._get_claude_prompt(mode)
-                if prompt:
-                    clipboard_copy(text)
-                    print("[SW] Raw text copied as backup", flush=True)
-                    self.signals.reformulation_started.emit()
-                    result, error = self._claude_reformat(text, prompt)
-                    if error:
-                        self.signals.warning.emit(error)
-                        return
-                    self.signals.transcription_done.emit(result)
-                    return
-            self.signals.transcription_done.emit(text)
-        except Exception as e:
+            text, removed = self.transcriber.transcribe(audio, self.config)
+        except Exception as exc:
             import traceback
             traceback.print_exc()
-            print(f"[SW] Error: {e}", flush=True)
-            self.signals.error.emit(f"Erreur: {e}")
+            self.is_processing = False
+            self.signals.error.emit(f"Erreur : {exc}")
+            return
 
-    def _get_claude_prompt(self, mode):
-        if mode in CLAUDE_BUILTIN_MODES:
-            overrides = self.config.get("claude_prompt_overrides", {})
-            return overrides.get(mode, CLAUDE_BUILTIN_MODES[mode]["prompt"])
-        if mode.startswith("custom:"):
-            name = mode[len("custom:"):]
-            for cm in self.config.get("claude_custom_modes", []):
-                if cm["name"] == name:
-                    return cm["prompt"]
-        return None
+        if removed:
+            log(f"artefacts retirés : {removed}")
+        if not text:
+            self.is_processing = False
+            self.signals.error.emit("Aucun texte détecté")
+            return
+        log(f"transcription : {text[:100]}")
 
-    def _claude_reformat(self, text, prompt):
-        """Returns (result, error). error is None on success, message string on failure."""
+        if pick:
+            self.signals.picker_requested.emit(text)
+            return
+        self._reformat_and_finish(text, self.config.get("reformat_mode", presets.DISABLED),
+                                 self.config.get("target_language", "none"), False)
+
+    def _on_picker_requested(self, text):
+        """Ouvre le sélecteur — sur le fil graphique, obligatoirement."""
+        self.overlay.hide_now()
+        picker = PresetPicker(self.config, text)
+        accepted = picker.exec() == QDialog.Accepted
+        mode = picker.chosen_mode if accepted else presets.DISABLED
+        language = picker.chosen_language if accepted else "none"
+        threading.Thread(target=self._reformat_and_finish,
+                         args=(text, mode, language, True), daemon=True).start()
+
+    def _reformat_and_finish(self, text, mode, target_language, from_picker):
+        system_prompt = presets.resolve(self.config, mode, target_language)
+        if not system_prompt:
+            self.signals.transcription_done.emit(text, from_picker)
+            return
+
+        effective_mode = presets.resolve_effective_mode(mode, target_language)
+        effective_language = presets.effective_language(effective_mode, target_language)
+        backend_name = presets.mode_backend(self.config, effective_mode)
+        backend = backends.build_backend(self.config, backend_name)
+
+        # Le texte brut est copié d'abord : si la reformulation échoue, rien n'est perdu.
+        clipboard_copy(text)
+
+        label = presets.mode_label(self.config, effective_mode)
+        if backend_name == "ollama":
+            label = f"{label} · {self.config.get('ollama_model', '')}"
+        self.signals.reformulation_started.emit(label)
+
         try:
-            print(f"[SW] Claude reformulating...", flush=True)
-            full_prompt = (
-                "RÔLE : Tu es un reformulateur de texte. Tu ne fais QUE de la reformulation. "
-                "Tu ne lances AUCUNE analyse, AUCUNE action, AUCUN outil, AUCUNE recherche. "
-                "Tu lis le texte, tu appliques les consignes, tu renvoies le résultat. C'est tout.\n\n"
-                f"{prompt}\n\n"
-                "RAPPEL FINAL : Renvoie UNIQUEMENT le texte reformulé. "
-                "Pas de commentaire, pas d'introduction, pas de 'Voici le résultat', "
-                "pas de guillemets autour, pas de markdown. Juste le texte final."
-            )
-            claude_cmd = CLAUDE_BIN
-            result = subprocess.run(
-                [claude_cmd, "-p", full_prompt, "--tools", ""],
-                input=text, capture_output=True, text=True, timeout=60)
-            if result.returncode == 0 and result.stdout.strip():
-                reformulated = result.stdout.strip()
-                print(f"[SW] Claude result: {reformulated[:80]}", flush=True)
-                return reformulated, None
-            err = result.stderr.strip()[:120] if result.stderr.strip() else f"code {result.returncode}"
-            print(f"[SW] Claude failed: {err}", flush=True)
-            return text, f"Claude échoué — texte brut copié ({err})"
-        except subprocess.TimeoutExpired:
-            print("[SW] Claude timeout (60s)", flush=True)
-            return text, "Claude timeout 60s — texte brut copié"
-        except FileNotFoundError:
-            print(f"[SW] Claude not found at {CLAUDE_BIN}", flush=True)
-            return text, f"Claude introuvable — texte brut copié"
-        except Exception as e:
-            print(f"[SW] Claude error: {e}", flush=True)
-            return text, f"Claude erreur — texte brut copié"
+            result, warning = backends.reformat(backend, text, system_prompt, effective_language)
+        except backends.ReformatError as exc:
+            log(f"reformulation échouée : {exc}")
+            self.is_processing = False
+            self.signals.warning.emit(str(exc))
+            return
+        except Exception as exc:
+            log(f"reformulation : erreur inattendue {exc}")
+            self.is_processing = False
+            self.signals.warning.emit("Reformulation impossible — texte brut collé")
+            return
 
-    def _on_rec_start(self):
-        self.tray.setIcon(self.icon_rec)
+        self.signals.transcription_done.emit(result, from_picker)
+        if warning:
+            self.signals.warning.emit(warning)
+
+    # ─── Retours visuels ─────────────────────────────────────────────────────
+
+    def _on_recording_started(self):
+        self.tray.setIcon(self.icon_recording)
         self.overlay.show_recording()
 
-    def _on_trans_start(self):
-        self.tray.setIcon(self.icon_work)
+    def _on_transcription_started(self):
+        self.tray.setIcon(self.icon_working)
         self.overlay.show_transcribing()
 
-    def _on_reform_start(self):
-        self.tray.setIcon(self.icon_work)
-        self.overlay.show_reformulating()
+    def _on_reformulation_started(self, label):
+        self.tray.setIcon(self.icon_working)
+        self.overlay.show_reformulating(label)
 
-    def _on_trans_done(self, text):
+    def _on_transcription_done(self, text, from_picker):
+        self.is_processing = False
+        self.last_activity = time.monotonic()
         self.tray.setIcon(self.icon_idle)
         clipboard_copy(text)
         self.overlay.show_done()
-        threading.Thread(target=auto_paste, daemon=True).start()
+        if not self.config.get("auto_paste", True):
+            return
+        if from_picker and not self.config.get("auto_paste_after_picker", True):
+            return
+        delay = PASTE_DELAY_AFTER_PICKER if from_picker else PASTE_DELAY
+        threading.Thread(target=auto_paste, args=(delay,), daemon=True).start()
 
     def _on_warning(self, text):
+        self.is_processing = False
         self.tray.setIcon(self.icon_idle)
         self.overlay.show_warning(text)
 
     def _on_error(self, text):
+        self.is_processing = False
         self.tray.setIcon(self.icon_idle)
         self.overlay.show_error(text)
 
-    def _on_audio(self, fft):
-        self.overlay.update_spectrum(fft)
+    # ─── Cycle de vie ────────────────────────────────────────────────────────
 
     def _quit(self):
-        remove_pid()
+        instance.remove_pid()
         self.tray.hide()
         self.app.quit()
 
@@ -1355,8 +447,7 @@ class SuperWhisper(QObject):
 
 
 if __name__ == "__main__":
-    if is_already_running():
+    if instance.is_already_running():
         print("SuperWhisper déjà en cours — ouverture des paramètres.")
         sys.exit(0)
-    app = SuperWhisper()
-    sys.exit(app.run())
+    sys.exit(SuperWhisper().run())

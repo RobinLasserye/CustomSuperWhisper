@@ -268,14 +268,18 @@ def _setup_autostart_linux(python_exe, app_script):
     os.makedirs(autostart_dir, exist_ok=True)
 
     desktop_path = os.path.join(autostart_dir, "superwhisper-custom.desktop")
+    # Le `sleep 3` et la phase KDE 2 sont nécessaires sur Plasma : lancée trop tôt, l'application
+    # démarre avant que la barre système existe et son icône n'apparaît jamais.
     desktop_content = f"""[Desktop Entry]
 Type=Application
 Name=SuperWhisper Custom
 Comment=Transcription vocale locale avec Ctrl+Alt+Space
-Exec={python_exe} {app_script}
+Exec=bash -c 'sleep 3 && exec "{python_exe}" "{app_script}"'
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
+X-KDE-autostart-phase=2
+X-KDE-autostart-after=panel
 StartupNotify=false
 Terminal=false
 Categories=Utility;Audio;
