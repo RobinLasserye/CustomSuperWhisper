@@ -13,6 +13,35 @@ def test_les_formats_historiques_existent_toujours():
         assert mode in presets.BUILTIN_PRESETS
 
 
+def test_les_nouveaux_formats_sont_complets():
+    for mode in ("readable", "prompt"):
+        assert presets.BUILTIN_PRESETS[mode]["name"]
+        assert presets.BUILTIN_PRESETS[mode]["prompt"].strip()
+
+
+def test_les_formats_de_prompt_gardent_leur_liste_de_consignes_bannies():
+    # « vérifie ton travail », « étape par étape » et l'orchestration d'agents imposée dégradent
+    # la réponse des modèles Claude 5 : les deux formats doivent interdire de les écrire.
+    for mode in ("prompt", "dev"):
+        assert "À NE JAMAIS ÉCRIRE" in presets.BUILTIN_PRESETS[mode]["prompt"]
+
+
+def test_instruction_dev_ne_prescrit_plus_de_strategie_dexecution():
+    prompt = presets.BUILTIN_PRESETS["dev"]["prompt"]
+    assert "Stratégie d'exécution" not in prompt
+    assert "Relire son propre code" not in prompt
+
+
+def test_message_soigne_borne_les_emojis():
+    prompt = presets.BUILTIN_PRESETS["readable"]["prompt"]
+    assert "UN SEUL emoji" in prompt
+    assert "🙂" in prompt          # la liste fermée est bien dans la consigne
+    # qwen3:8b ne sait pas s'abstenir d'emoji : la liste exclut donc les emojis festifs, qui
+    # sont les seuls à vraiment détonner sur un message factuel (mesuré, voir le design doc).
+    for festif in ("🎉", "🙌"):
+        assert festif not in prompt
+
+
 def test_prompt_par_defaut():
     prompt = presets.preset_prompt(EMPTY, "mail")
     assert "e-mail" in prompt.lower()
