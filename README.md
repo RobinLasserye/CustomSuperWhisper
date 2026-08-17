@@ -157,3 +157,7 @@ dépassé).
 
 **Sur Wayland**, l'overlay utilise le scripting KWin pour rester au-dessus des autres fenêtres, et
 `wl-copy` pour le presse-papier (`QClipboard` n'est pas fiable sans focus).
+
+## Licence
+
+GPL-3.0 — voir [LICENSE](LICENSE). © 2026 Robin Lasserye.
