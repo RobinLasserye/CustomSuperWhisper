@@ -1,3 +1,7 @@
+> Mise à jour : un [historique persistant local optionnel](local-history.md) peut désormais conserver
+> textes, mesures, évaluations et audio. Les mentions « mémoire uniquement » ci-dessous décrivent
+> le fonctionnement initial, applicable quand la collecte persistante est désactivée.
+
 # Comprendre le pipeline LangGraph
 
 Dans **Paramètres → Reformulation → Pipeline**, choisir **LangGraph + LangChain**, puis

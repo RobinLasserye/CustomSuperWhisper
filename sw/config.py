@@ -51,6 +51,11 @@ DEFAULT_CONFIG = {
     "ollama_num_ctx": 8192,
     "ollama_temperature": 0.2,
 
+    # Historique privé : activation explicite dans Général
+    "history_enabled": False,
+    "history_audio_enabled": False,
+    "history_audio_codec": "lossless",
+
     # Comportement
     "auto_paste": True,
     "auto_paste_after_picker": True,

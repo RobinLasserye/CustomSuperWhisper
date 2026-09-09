@@ -2,6 +2,7 @@
 
 import gc
 import os
+from time import perf_counter
 
 from . import artifacts, vocabulary
 from .runtime import log
@@ -63,7 +64,7 @@ class Transcriber:
 
     # — Transcription —
 
-    def transcribe_segments(self, audio, config):
+    def transcribe_segments(self, audio, config, *, with_metrics=False):
         if self.model is None:
             self.load_model(config)
 
@@ -77,14 +78,29 @@ class Transcriber:
             if initial_prompt:
                 kwargs["initial_prompt"] = initial_prompt
 
+        started = perf_counter()
         segments, _info = self.model.transcribe(
             audio, language=config.get("language"), beam_size=5, vad_filter=True, **kwargs)
-        return list(segments)
+        segments = list(segments)
+        metrics = {
+            "whisper_duration_ms": (perf_counter() - started) * 1000,
+            "detected_language": getattr(_info, "language", None),
+            "language_probability": getattr(_info, "language_probability", None),
+            "duration_after_vad_s": getattr(_info, "duration_after_vad", None),
+            "segments": [{key: getattr(segment, key, None) for key in
+                          ("start", "end", "text", "avg_logprob", "no_speech_prob", "compression_ratio")}
+                         for segment in segments],
+        }
+        return (segments, metrics) if with_metrics else segments
 
-    def transcribe(self, audio, config):
+    def transcribe(self, audio, config, *, with_metrics=False):
         """Retourne (texte final, artefacts retirés)."""
-        segments = self.transcribe_segments(audio, config)
-        return postprocess(segments, config)
+        segments, metrics = self.transcribe_segments(audio, config, with_metrics=True)
+        started = perf_counter()
+        result = postprocess(segments, config)
+        metrics["cleanup_duration_ms"] = (perf_counter() - started) * 1000
+        metrics["raw_transcript"] = " ".join(segment.text.strip() for segment in segments)
+        return (*result, metrics) if with_metrics else result
 
 
 def postprocess(segments, config):

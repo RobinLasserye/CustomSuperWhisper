@@ -5,7 +5,9 @@ pipelines have no clipboard, UI or persistence effects; the application delivers
 exactly one result. Optional framework imports keep the legacy path usable.
 """
 from dataclasses import dataclass, field
-from time import perf_counter
+from time import perf_counter, thread_time
+from datetime import datetime, timezone
+from uuid import uuid4
 from typing import TypedDict
 
 from . import backends, langcheck, presets
@@ -22,6 +24,7 @@ class Step:
     detail: str
     attempt: int = 0
     prompt: str = ""
+    metrics: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -35,6 +38,12 @@ class Execution:
     output: str = ""
     warning: str | None = None
     steps: list[Step] = field(default_factory=list)
+    run_id: str = field(default_factory=lambda: str(uuid4()))
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    schema_version: int = 1
+    settings: dict = field(default_factory=dict)
+    metrics: dict = field(default_factory=dict)
+    review: dict = field(default_factory=dict)
 
 
 class DictationState(TypedDict):
@@ -56,6 +65,8 @@ def _factory(config, name, engine):
 
 def run_pipeline(config, text, mode, target_language, *, backend_factory=None):
     """Return a report and safe output, including dependency/model failures."""
+    started = perf_counter()
+    cpu_started = thread_time()
     engine = "langgraph" if config.get("pipeline") == "langgraph" else "legacy"
     effective_mode = presets.resolve_effective_mode(mode, target_language)
     language = presets.effective_language(effective_mode, target_language)
@@ -64,6 +75,12 @@ def run_pipeline(config, text, mode, target_language, *, backend_factory=None):
         name = "ollama"
     report = Execution(engine, text, effective_mode, language, name,
                        config.get("ollama_model", "") if name == "ollama" else "Claude Code")
+    report.settings = {key: config[key] for key in (
+        "model", "language", "compute_type", "gpu_index", "ollama_temperature",
+        "ollama_num_ctx", "ollama_keep_alive", "ollama_timeout_s", "artifact_filter",
+        "corrections_enabled", "vocab_biasing", "auto_paste", "auto_paste_after_picker"
+    ) if key in config}
+    report.settings["ollama_top_p"] = 0.9
     prompt = presets.resolve(config, mode, target_language)
     factory = backend_factory or _factory
     try:
@@ -78,6 +95,10 @@ def run_pipeline(config, text, mode, target_language, *, backend_factory=None):
         report.output = text
         report.warning = _error_message(exc)
         report.steps.append(Step("fallback", 0, text, text, report.warning))
+    report.metrics["pipeline_duration_ms"] = (perf_counter() - started) * 1000
+    report.metrics["client_thread_cpu_ms"] = (thread_time() - cpu_started) * 1000
+    from .metrics import runtime_versions
+    report.settings["runtime_versions"] = runtime_versions()
     return report
 
 
@@ -104,6 +125,7 @@ def _run_graph(report, config, prompt, factory):
         try:
             if backend is None:
                 backend = factory(config, report.backend, "langgraph")
+            backend.last_metrics = {}
             result = backend.reformat(state["source"], state["prompt"])
             if not result.strip():
                 raise backends.ReformatError("Réponse vide — texte brut conservé")
@@ -152,7 +174,8 @@ def _run_graph(report, config, prompt, factory):
                                      state["candidate"] or state["source"],
                                      after["candidate"] or state["source"], detail,
                                      after["attempt"],
-                                     state["prompt"] if node == "format" else ""))
+                                     state["prompt"] if node == "format" else "",
+                                     dict(getattr(backend, "last_metrics", {})) if node == "format" else {}))
             return update
         return invoke
 
@@ -193,6 +216,7 @@ def _run_legacy(report, config, prompt, factory):
                 result = text
                 detail = "Appel du backend historique"
                 try:
+                    backend.last_metrics = {}
                     result = backend.reformat(text, system_prompt)
                     return result
                 except Exception:
@@ -200,7 +224,8 @@ def _run_legacy(report, config, prompt, factory):
                     raise
                 finally:
                     report.steps.append(Step("format", (perf_counter() - start) * 1000,
-                                             text, result, detail, self.attempt, system_prompt))
+                                             text, result, detail, self.attempt, system_prompt,
+                                             dict(getattr(backend, "last_metrics", {}))))
 
         report.output, report.warning = backends.reformat(
             ObservedBackend(), report.source, prompt, report.language)

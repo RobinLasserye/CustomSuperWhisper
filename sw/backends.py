@@ -184,6 +184,7 @@ class OllamaBackend:
     # — Reformulation —
 
     def reformat(self, text, system_prompt):
+        self.last_metrics = {}
         payload = {
             "model": self.model,
             "messages": [{"role": "system", "content": system_prompt},
@@ -218,6 +219,8 @@ class OllamaBackend:
             raise ReformatError("Ollama : réponse illisible — texte brut collé") from exc
 
         try:
+            from .metrics import model_metrics
+            self.last_metrics = model_metrics(data)
             content = clean_output((data.get("message") or {}).get("content", ""))
         except AttributeError as exc:
             raise ReformatError("Ollama : réponse de forme inattendue — texte brut collé") from exc

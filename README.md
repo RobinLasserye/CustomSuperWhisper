@@ -172,3 +172,8 @@ options de collage s'appliquent aussi au repli.
 
 **Sur Wayland**, l'overlay utilise le scripting KWin pour rester au-dessus des autres fenêtres, et
 `wl-copy` pour le presse-papier (`QClipboard` n'est pas fiable sans focus).
+
+## Historique local d’évaluation
+
+Collecte optionnelle hors Git : dictées, étapes, mesures Ollama/Whisper, évaluations et audio
+compressé (original exact ou Opus). Voir [le guide](docs/local-history.md).

@@ -553,6 +553,26 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(page)
         layout.setSpacing(12)
 
+        history_box = QGroupBox("Historique local d’évaluation")
+        history_layout = QVBoxLayout(history_box)
+        self.history_check = QCheckBox("Conserver textes, consignes et mesures sur cet ordinateur")
+        self.history_check.setChecked(self.config.get("history_enabled", False))
+        history_layout.addWidget(self.history_check)
+        self.history_audio_check = QCheckBox("Conserver aussi l’audio compressé des dictées")
+        self.history_audio_check.setChecked(self.config.get("history_audio_enabled", False))
+        self.history_audio_check.setEnabled(self.history_check.isChecked())
+        self.history_check.toggled.connect(self.history_audio_check.setEnabled)
+        history_layout.addWidget(self.history_audio_check)
+        self.history_codec = QComboBox()
+        self.history_codec.addItem("Original exact — sans perte, stockage plus important", "lossless")
+        self.history_codec.addItem("Opus voix 32 kb/s — compact, avec perte", "opus")
+        self._select(self.history_codec, self.config.get("history_audio_codec", "lossless"))
+        history_layout.addWidget(self.history_codec)
+        history_layout.addWidget(_hint("Données privées hors du dépôt Git, aucun envoi automatique. "
+                                      "Conservation jusqu’à suppression dans Exécutions locales. "
+                                      "Désactiver la collecte ne supprime pas les données existantes."))
+        layout.addWidget(history_box)
+
         box = QGroupBox("Collage")
         box_layout = QVBoxLayout(box)
         self.auto_paste_check = QCheckBox("Coller automatiquement après la dictée (Ctrl+V simulé)")
@@ -638,6 +658,9 @@ class SettingsDialog(QDialog):
         self.config["artifact_logprob_threshold"] = self.logprob_spin.value()
         self.config["collapse_repetitions"] = self.collapse_check.isChecked()
 
+        self.config["history_audio_codec"] = self.history_codec.currentData()
+        self.config["history_enabled"] = self.history_check.isChecked()
+        self.config["history_audio_enabled"] = self.history_audio_check.isChecked()
         self.config["pipeline"] = self.pipeline_combo.currentData()
         self.config["reformat_backend"] = self.backend_combo.currentData()
         self.config["ollama_host"] = self.host_edit.text().strip()

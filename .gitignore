@@ -8,3 +8,18 @@ superwhisper.sh
 superwhisper.bat
 superwhisper.vbs
 .pytest_cache/
+
+# Private evaluation data must never enter version control
+history.sqlite3*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.wav
+*.flac
+*.opus
+*.ogg
+*.npz
+evaluation-data/
+private-history/

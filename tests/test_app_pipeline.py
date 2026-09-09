@@ -79,3 +79,17 @@ def test_graph_preload_never_uses_legacy_network_path(module, monkeypatch):
     app = SimpleNamespace(config={"pipeline": "langgraph", "reformat_mode": "message"})
     module.SuperWhisper._warm_up_backend(app)
     assert not calls
+
+
+def test_history_failure_does_not_prevent_delivery(module, monkeypatch):
+    class BrokenStore:
+        def save(self, *args, **kwargs):
+            raise OSError('disk full')
+    monkeypatch.setattr(module.pipeline, 'run_pipeline', lambda *_: module.pipeline.Execution(
+        'legacy', 'synthetic', 'disabled', 'none', 'ollama', 'test', output='delivered'))
+    app = SimpleNamespace(config={'history_enabled': True}, history_store=BrokenStore(),
+                          signals=SimpleNamespace(execution_done=Signal(), transcription_done=Signal(),
+                                                  warning=Signal(), reformulation_started=Signal()))
+    module.SuperWhisper._reformat_and_finish(app, 'synthetic', 'disabled', 'none', False)
+    assert app.signals.transcription_done.emissions == [('delivered', False)]
+    assert app.signals.execution_done.emissions[0][0].metrics["history_saved"] is False

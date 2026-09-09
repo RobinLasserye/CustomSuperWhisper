@@ -39,6 +39,7 @@ class LangChainOllamaBackend(OllamaBackend):
         from langchain_ollama import ChatOllama
         from langsmith import tracing_context
 
+        self.last_metrics = {}
         validate_local({"ollama_host": self.host, "ollama_model": self.model})
         try:
             with tracing_context(enabled=False):
@@ -51,6 +52,8 @@ class LangChainOllamaBackend(OllamaBackend):
                 )
                 response = model.invoke([("system", system_prompt), ("human", text)],
                                         config={"callbacks": []})
+                from .metrics import model_metrics
+                self.last_metrics = model_metrics(response.response_metadata)
                 result = clean_output(response.content)
             if not result:
                 raise ReformatError("Le modèle local a renvoyé une réponse vide — texte brut conservé")

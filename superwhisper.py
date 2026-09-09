@@ -34,6 +34,7 @@ from sw.transcriber import Transcriber                                    # noqa
 from sw.ui.overlay import Overlay                                         # noqa: E402
 from sw.ui.picker import PresetPicker                                     # noqa: E402
 from sw.ui.execution import ExecutionDialog
+from sw.history import HistoryStore
 from sw.ui.settings import SettingsDialog                                 # noqa: E402
 
 if not IS_WINDOWS:
@@ -48,7 +49,7 @@ class Signals(QObject):
     recording_started = Signal()
     transcription_started = Signal()
     reformulation_started = Signal(str)
-    picker_requested = Signal(str)
+    picker_requested = Signal(str, object)
     transcription_done = Signal(str, bool)
     execution_done = Signal(object)
     warning = Signal(str)
@@ -90,7 +91,12 @@ class SuperWhisper(QObject):
         self._settings_dialog = None
         self._picker = None
         self._pick_armed = False
-        self._execution_dialog = ExecutionDialog()
+        try:
+            self.history_store = HistoryStore()
+        except Exception:
+            self.history_store = None
+            log("Historique privé indisponible — aucun enregistrement sur disque")
+        self._execution_dialog = ExecutionDialog(store=self.history_store)
 
         self.overlay = Overlay()
         self._build_tray()
@@ -369,8 +375,25 @@ class SuperWhisper(QObject):
     # ─── Chaîne de traitement ────────────────────────────────────────────────
 
     def _transcribe(self, audio, pick):
+        started = time.perf_counter()
+        transcription_config = copy.deepcopy(self.config)
+        history_enabled = transcription_config.get("history_enabled", False)
+        context = {"started": started, "metrics": {"audio_duration_s": len(audio) / SAMPLE_RATE},
+                   "transcription_settings": {key: transcription_config[key] for key in (
+                       "model", "language", "compute_type", "gpu_index", "audio_device",
+                       "vocab_biasing", "vocabulary", "corrections_enabled", "corrections",
+                       "cloud_rule_enabled", "cloud_exceptions", "artifact_filter", "artifact_patterns",
+                       "artifact_ambiguous_enabled", "artifact_ambiguous", "artifact_no_speech_threshold",
+                       "artifact_logprob_threshold", "collapse_repetitions"
+                   ) if key in transcription_config}}
+
+        if history_enabled and transcription_config.get("history_audio_enabled", False):
+            context["audio"] = audio
         try:
-            text, removed = self.transcriber.transcribe(audio, self.config)
+            text, removed, metrics = self.transcriber.transcribe(audio, transcription_config, with_metrics=True)
+            context["metrics"].update(metrics)
+            context["metrics"]["transcription_total_ms"] = (time.perf_counter() - started) * 1000
+            context["metrics"]["removed_artifacts"] = removed
         except Exception as exc:
             import traceback
             traceback.print_exc()
@@ -387,12 +410,12 @@ class SuperWhisper(QObject):
         log(f"transcription : {text[:100]}")
 
         if pick:
-            self.signals.picker_requested.emit(text)
+            self.signals.picker_requested.emit(text, context)
             return
         self._reformat_and_finish(text, self.config.get("reformat_mode", presets.DISABLED),
-                                 self.config.get("target_language", "none"), False)
+                                 self.config.get("target_language", "none"), False, context)
 
-    def _on_picker_requested(self, text):
+    def _on_picker_requested(self, text, context=None):
         """Ouvre le sélecteur — sur le fil graphique, obligatoirement."""
         if getattr(self, "_picker", None) is not None:
             # Une dictée relancée pendant que le sélecteur est ouvert : on garde le premier
@@ -411,9 +434,9 @@ class SuperWhisper(QObject):
         mode = picker.chosen_mode if accepted else presets.DISABLED
         language = picker.chosen_language if accepted else "none"
         threading.Thread(target=self._reformat_and_finish,
-                         args=(text, mode, language, True), daemon=True).start()
+                         args=(text, mode, language, True, context), daemon=True).start()
 
-    def _reformat_and_finish(self, text, mode, target_language, from_picker):
+    def _reformat_and_finish(self, text, mode, target_language, from_picker, context=None):
         # One immutable snapshot per execution; no UI or clipboard effects inside the graph.
         config = copy.deepcopy(self.config)
         if presets.resolve(config, mode, target_language):
@@ -423,10 +446,27 @@ class SuperWhisper(QObject):
                 label = f"{label} · {config.get('ollama_model', '')}"
             self.signals.reformulation_started.emit(label)
         report = pipeline.run_pipeline(config, text, mode, target_language)
-        self.signals.execution_done.emit(report)
+        if context:
+            report.metrics.update(context.get("metrics", {}))
+            report.settings.update(context.get("transcription_settings", {}))
+            report.metrics["stop_to_result_ms"] = (time.perf_counter() - context["started"]) * 1000
+            report.metrics["includes_picker_wait"] = from_picker
+        # Queue delivery before compression / disk access; storage cannot block dictation.
         self.signals.transcription_done.emit(report.output, from_picker)
         if report.warning:
             self.signals.warning.emit(report.warning)
+        if config.get("history_enabled", False):
+            try:
+                store = getattr(self, "history_store", None)
+                if store is None:
+                    raise OSError("History unavailable")
+                store.save(report, audio=(context or {}).get("audio")
+                           if config.get("history_audio_enabled", False) else None,
+                           sample_rate=SAMPLE_RATE, codec=config.get("history_audio_codec", "lossless"))
+            except Exception:
+                report.metrics["history_saved"] = False
+
+        self.signals.execution_done.emit(report)
 
     # ─── Retours visuels ─────────────────────────────────────────────────────
 
