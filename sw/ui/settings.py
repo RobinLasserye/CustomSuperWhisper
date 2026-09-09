@@ -27,6 +27,7 @@ def _muted(button):
 
 
 def _scrollable(widget):
+    widget.setObjectName("scrollPage")
     area = QScrollArea()
     area.setWidgetResizable(True)
     area.setWidget(widget)

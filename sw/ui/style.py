@@ -88,7 +88,7 @@ QProgressBar {{
     text-align: center; color: {TEXT}; min-height: 18px;
 }}
 QProgressBar::chunk {{ background: {ACCENT}; border-radius: 7px; }}
-QScrollArea, QScrollArea::viewport {{ border: none; background: {BASE}; }}
+QScrollArea, QScrollArea::viewport, QWidget#scrollPage {{ border: none; background: {BASE}; }}
 QScrollBar:vertical {{ background: {BASE}; width: 10px; margin: 0; }}
 QScrollBar::handle:vertical {{ background: {BORDER}; border-radius: 5px; min-height: 30px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
