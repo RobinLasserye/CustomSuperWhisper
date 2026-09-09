@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 from .. import artifacts, backends, presets, transcriber, vocabulary
 from ..config import save_config
 from ..hardware import get_audio_inputs, get_gpu_list
+from ..history import HistoryStore
 from . import style
 from .models_tab import ModelsTab
 
@@ -36,6 +37,23 @@ def _scrollable(widget):
     area.setStyleSheet(f"QScrollArea, QScrollArea::viewport {{ background-color: {style.BASE}; border: none; }}")
     area.setWidget(widget)
     return area
+
+
+def format_metrics_summary(stats, config):
+    """Return aggregate, privacy-safe metrics text for the settings panel."""
+    payload = {
+        "collection": {
+            "local_history_enabled": bool(config.get("history_enabled", False)),
+            "device_metrics_enabled": bool(config.get("device_metrics_enabled", True)),
+            "audio_archive_enabled": bool(config.get("history_audio_enabled", False)),
+            "audio_codec": config.get("history_audio_codec", "lossless"),
+            "storage": "local SQLite only; no automatic export",
+            "excluded_from_telemetry": ["prompts", "transcripts", "audio content", "outputs"],
+        },
+        "aggregates": stats,
+    }
+    import json
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 class SettingsDialog(QDialog):
@@ -69,6 +87,7 @@ class SettingsDialog(QDialog):
         self.models_tab = ModelsTab(config, on_apply=self._apply_recommendation)
         self.tabs.addTab(_scrollable(self.models_tab), "Modèles")
         self.tabs.addTab(_scrollable(self._build_general_tab()), "Général")
+        self.tabs.addTab(_scrollable(self._build_metrics_tab()), "Métriques")
         layout.addWidget(self.tabs, 1)
 
         save = QPushButton("Sauvegarder")
@@ -76,6 +95,34 @@ class SettingsDialog(QDialog):
         layout.addWidget(save)
 
         self._on_mode_changed()
+
+    def _build_metrics_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(12)
+        title = QLabel("Observabilité locale")
+        title.setStyleSheet(f"color: {style.ACCENT}; font-size: 16px; font-weight: bold;")
+        layout.addWidget(title)
+        layout.addWidget(_hint(
+            "Cet onglet affiche uniquement des agrégats conservés sur cet ordinateur. "
+            "Les prompts, transcriptions, contenus audio et sorties ne sont pas envoyés par la télémétrie."
+        ))
+        self.metrics_summary = QPlainTextEdit()
+        self.metrics_summary.setReadOnly(True)
+        self.metrics_summary.setMinimumHeight(360)
+        layout.addWidget(self.metrics_summary, 1)
+        refresh = QPushButton("Actualiser les métriques")
+        refresh.clicked.connect(self._refresh_metrics)
+        layout.addWidget(refresh)
+        self._refresh_metrics()
+        return page
+
+    def _refresh_metrics(self):
+        try:
+            stats = HistoryStore().statistics()
+        except Exception as exc:
+            stats = {"unavailable": str(exc)}
+        self.metrics_summary.setPlainText(format_metrics_summary(stats, self.config))
 
     # ─── Onglet Transcription ────────────────────────────────────────────────
 
