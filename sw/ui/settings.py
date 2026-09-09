@@ -28,8 +28,12 @@ def _muted(button):
 
 def _scrollable(widget):
     widget.setObjectName("scrollPage")
+    widget.setAttribute(Qt.WA_StyledBackground, True)
+    widget.setStyleSheet(f"background-color: {style.BASE};")
     area = QScrollArea()
     area.setWidgetResizable(True)
+    area.setAttribute(Qt.WA_StyledBackground, True)
+    area.setStyleSheet(f"QScrollArea, QScrollArea::viewport {{ background-color: {style.BASE}; border: none; }}")
     area.setWidget(widget)
     return area
 
