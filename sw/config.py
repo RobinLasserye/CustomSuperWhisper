@@ -55,6 +55,7 @@ DEFAULT_CONFIG = {
     "history_enabled": False,
     "history_audio_enabled": False,
     "history_audio_codec": "lossless",
+    "device_metrics_enabled": True,
 
     # Comportement
     "auto_paste": True,

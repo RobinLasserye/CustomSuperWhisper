@@ -1,5 +1,6 @@
 """Allowlisted model counters. Missing measurements stay missing, never zero."""
 import math
+import threading
 
 
 def model_metrics(metadata):
@@ -18,6 +19,108 @@ def model_metrics(metadata):
                                     ('input_tokens', 'prompt_eval_duration_ms', 'input_tokens_per_second')):
         if count in result and result.get(duration, 0) > 0:
             result[target] = result[count] * 1000 / result[duration]
+    return result
+
+
+def _number(value):
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
+
+
+class SystemMetricsSampler:
+    """Best-effort local process/system sampler; never raises or sends data."""
+
+    def __init__(self, interval=0.1, gpu_index=0):
+        self.interval = interval
+        self.gpu_index = gpu_index
+        self._stop = threading.Event()
+        self._thread = None
+        self._samples = []
+
+    @staticmethod
+    def _sample_gpu(index):
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            handle = pynvml.nvmlDeviceGetHandleByIndex(int(index))
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            sample = {
+                "gpu_utilization_percent": _number(util.gpu),
+                "gpu_memory_utilization_percent": _number(util.memory),
+                "gpu_memory_used_bytes": _number(memory.used),
+                "gpu_memory_total_bytes": _number(memory.total),
+            }
+            for key, fn in (("gpu_temperature_c", pynvml.nvmlDeviceGetTemperature),
+                            ("gpu_power_watts", lambda h, sensor=pynvml.NVML_TEMPERATURE_GPU: pynvml.nvmlDeviceGetPowerUsage(h) / 1000)):
+                try:
+                    sample[key] = _number(fn(handle, sensor=0) if key.endswith("temperature_c") else fn(handle))
+                except Exception:
+                    pass
+            return sample
+        except Exception:
+            return {}
+
+    def sample(self):
+        result = {}
+        try:
+            import psutil
+            process = psutil.Process()
+            result.update({"process_rss_bytes": _number(process.memory_info().rss),
+                           "process_cpu_user_seconds": _number(process.cpu_times().user),
+                           "process_cpu_system_seconds": _number(process.cpu_times().system),
+                           "system_cpu_percent": _number(psutil.cpu_percent(None)),
+                           "system_memory_percent": _number(psutil.virtual_memory().percent)})
+        except Exception:
+            pass
+        result.update(self._sample_gpu(self.gpu_index))
+        return result
+
+    def _run(self):
+        while not self._stop.is_set():
+            self._samples.append(self.sample())
+            self._stop.wait(self.interval)
+
+    def start(self):
+        self._samples = []
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="superwhisper-metrics", daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=max(1.0, self.interval * 3))
+        self._samples.append(self.sample())
+        keys = sorted({key for sample in self._samples for key in sample})
+        result = {"samples": len(self._samples), "sampling_interval_ms": self.interval * 1000}
+        for key in keys:
+            values = [sample[key] for sample in self._samples if _number(sample.get(key)) is not None]
+            if values:
+                result[key] = values[-1]
+                result[key.replace("percent", "peak_percent").replace("bytes", "peak_bytes")] = max(values)
+        return result
+
+
+def local_trace(name, attributes=None):
+    """Optional OpenTelemetry span, configured with no exporter and no content."""
+    try:
+        from opentelemetry import trace
+        tracer = trace.get_tracer("superwhisper.local")
+        return tracer.start_as_current_span(name, attributes=attributes or {})
+    except Exception:
+        from contextlib import nullcontext
+        return nullcontext()
+
+
+def sanitize_attributes(attributes):
+    """Allow only scalar, non-content telemetry attributes."""
+    result = {}
+    for key, value in (attributes or {}).items():
+        if not isinstance(key, str) or key in {"prompt", "transcript", "audio", "content", "output"}:
+            continue
+        if isinstance(value, (str, int, float, bool)) and (not isinstance(value, float) or math.isfinite(value)):
+            result[key] = value
     return result
 
 

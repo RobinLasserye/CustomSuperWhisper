@@ -159,6 +159,10 @@ def install_dependencies(has_gpu):
         "pynput",
         "langchain-ollama==1.1.0",
         "langgraph==1.2.11",
+        "psutil",
+        "nvidia-ml-py",
+        "opentelemetry-api",
+        "opentelemetry-sdk",
     ]
 
     # faster-whisper with CUDA support

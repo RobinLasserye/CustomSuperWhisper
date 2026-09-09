@@ -11,6 +11,7 @@ from uuid import uuid4
 from typing import TypedDict
 
 from . import backends, langcheck, presets
+from .metrics import local_trace, sanitize_attributes
 
 UNCERTAIN = "Traduction incertaine — vérifie la langue"
 
@@ -84,13 +85,16 @@ def run_pipeline(config, text, mode, target_language, *, backend_factory=None):
     prompt = presets.resolve(config, mode, target_language)
     factory = backend_factory or _factory
     try:
-        if engine == "langgraph":
-            # Disable tracing even if the parent process exports LangSmith credentials.
-            from langsmith import tracing_context
-            with tracing_context(enabled=False):
-                _run_graph(report, config, prompt, factory)
-        else:
-            _run_legacy(report, config, prompt, factory)
+        trace = local_trace("superwhisper.pipeline", sanitize_attributes(
+            {"pipeline": engine, "backend": name, "mode": effective_mode}))
+        with trace:
+            if engine == "langgraph":
+                # Disable tracing even if the parent process exports LangSmith credentials.
+                from langsmith import tracing_context
+                with tracing_context(enabled=False):
+                    _run_graph(report, config, prompt, factory)
+            else:
+                _run_legacy(report, config, prompt, factory)
     except Exception as exc:
         report.output = text
         report.warning = _error_message(exc)

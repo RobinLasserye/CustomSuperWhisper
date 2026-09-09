@@ -35,6 +35,7 @@ from sw.ui.overlay import Overlay                                         # noqa
 from sw.ui.picker import PresetPicker                                     # noqa: E402
 from sw.ui.execution import ExecutionDialog
 from sw.history import HistoryStore
+from sw.metrics import SystemMetricsSampler, local_trace
 from sw.ui.settings import SettingsDialog                                 # noqa: E402
 
 if not IS_WINDOWS:
@@ -378,6 +379,8 @@ class SuperWhisper(QObject):
         started = time.perf_counter()
         transcription_config = copy.deepcopy(self.config)
         history_enabled = transcription_config.get("history_enabled", False)
+        sampler = (SystemMetricsSampler(gpu_index=transcription_config.get("gpu_index", 0)).start()
+                   if history_enabled and transcription_config.get("device_metrics_enabled", True) else None)
         context = {"started": started, "metrics": {"audio_duration_s": len(audio) / SAMPLE_RATE},
                    "transcription_settings": {key: transcription_config[key] for key in (
                        "model", "language", "compute_type", "gpu_index", "audio_device",
@@ -391,10 +394,16 @@ class SuperWhisper(QObject):
             context["audio"] = audio
         try:
             text, removed, metrics = self.transcriber.transcribe(audio, transcription_config, with_metrics=True)
+            if sampler:
+                context["metrics"].update(sampler.stop())
+                sampler = None
             context["metrics"].update(metrics)
             context["metrics"]["transcription_total_ms"] = (time.perf_counter() - started) * 1000
             context["metrics"]["removed_artifacts"] = removed
         except Exception as exc:
+            if sampler:
+                context["metrics"].update(sampler.stop())
+                sampler = None
             import traceback
             traceback.print_exc()
             self.is_processing = False
