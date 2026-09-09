@@ -157,6 +157,8 @@ def install_dependencies(has_gpu):
         "numpy",
         "sounddevice",
         "pynput",
+        "langchain-ollama==1.1.0",
+        "langgraph==1.2.11",
     ]
 
     # faster-whisper with CUDA support

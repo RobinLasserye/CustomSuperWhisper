@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "collapse_repetitions": True,
 
     # Reformulation
+    "pipeline": "legacy",                 # legacy ou langgraph
     "reformat_mode": "disabled",
     "reformat_backend": "ollama",
     "reformat_mode_backends": {},

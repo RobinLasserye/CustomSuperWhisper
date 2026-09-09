@@ -154,3 +154,13 @@ def test_les_corrections_font_l_aller_retour(app, config, saved):
     regles = saved["corrections"]
     assert regles[0] == {"from": "machin", "to": "Machin", "regex": False, "enabled": True}
     assert regles[1]["enabled"] is False
+
+
+def test_pipeline_selection_round_trip(app, config, saved):
+    dialog = SettingsDialog(config)
+    assert dialog.pipeline_combo.currentData() == "legacy"
+    dialog._select(dialog.pipeline_combo, "langgraph")
+    dialog._save()
+    assert saved["pipeline"] == "langgraph"
+    reopened = SettingsDialog(saved)
+    assert reopened.pipeline_combo.currentData() == "langgraph"

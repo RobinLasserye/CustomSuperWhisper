@@ -107,6 +107,18 @@ Pour évaluer un modèle qui n'est pas dans cette liste :
 python tools/eval_models.py mon-modele:tag --runs 3
 ```
 
+## Pipeline LangGraph et vue d'exécution
+
+Dans **Paramètres → Reformulation → Pipeline**, sélectionner **LangGraph + LangChain** pour
+suivre les étapes explicites du traitement. **Historique (comparaison)** reste le choix par défaut.
+Après une dictée, **menu de la barre système → Exécutions locales** montre les étapes, durées,
+décisions de retry et textes avant/après, avec la consigne envoyée au modèle. Dix exécutions sont
+conservées en mémoire, effaçables, sans tracing cloud.
+
+Le nouveau chemin Ollama exige un serveur loopback et un modèle local ; Claude Code reste une
+option réseau explicite. Consulter le [guide du pipeline](docs/langgraph-pipeline.md) pour les
+nœuds, l'état, les données transmises, l'installation et les limites.
+
 ## Développement
 
 ```
@@ -116,7 +128,10 @@ sw/config.py            schéma, chargement, migration
 sw/vocabulary.py        biais Whisper et moteur de corrections
 sw/artifacts.py         filtre des hallucinations
 sw/presets.py           formats et traduction
-sw/backends.py          Ollama, Claude Code, contrôle de la langue de sortie
+sw/backends.py          Ollama historique, Claude Code, contrôle de la langue
+sw/pipeline.py          orchestration historique / LangGraph et rapports locaux
+sw/langchain_backend.py client ChatOllama avec garde locale
+sw/ui/execution.py      inspecteur des dix dernières exécutions en mémoire
 sw/langcheck.py         heuristique « ce texte est-il dans la bonne langue ? »
 sw/models_catalog.py    mesures, recommandations VRAM, téléchargements
 sw/transcriber.py       faster-whisper
@@ -127,7 +142,7 @@ sw/hardware.py          GPU et entrées audio
 sw/ui/                  overlay, réglages, sélecteur, onglet modèles
 tools/eval_models.py    test de pièges (fidélité d'un modèle)
 tools/e2e_check.py      chaîne complète audio → texte → reformulation
-tests/                  119 tests pytest (logique pure + sélecteur hors écran)
+tests/                  tests pytest (logique pure + interfaces hors écran)
 ```
 
 ```bash
@@ -151,9 +166,9 @@ qui refuse le 16 kHz (`PaErrorCode -9997`).
 le gestionnaire de fenêtres ne le rend pas, décochez « Coller aussi quand le sélecteur a été
 utilisé » dans l'onglet Général : le texte reste dans le presse-papier.
 
-**Reformulation qui échoue** — le texte brut est copié **avant** l'appel au modèle : en cas
-d'échec, rien n'est perdu et l'overlay affiche la cause (Ollama éteint, modèle absent, délai
-dépassé).
+**Reformulation qui échoue** — le texte brut est conservé en mémoire puis livré en cas
+d'échec, avec un avertissement dans l'overlay. Le presse-papier reçoit un seul résultat ; les
+options de collage s'appliquent aussi au repli.
 
 **Sur Wayland**, l'overlay utilise le scripting KWin pour rester au-dessus des autres fenêtres, et
 `wl-copy` pour le presse-papier (`QClipboard` n'est pas fiable sans focus).

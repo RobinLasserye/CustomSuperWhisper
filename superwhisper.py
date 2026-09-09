@@ -26,13 +26,14 @@ from PySide6.QtWidgets import (                                           # noqa
     QApplication, QDialog, QMenu, QSystemTrayIcon,
 )
 
-from sw import backends, config as config_module, instance, presets       # noqa: E402
+from sw import backends, config as config_module, instance, presets, pipeline  # noqa: E402
 from sw.audio import SAMPLE_RATE, AudioRecorder                           # noqa: E402
 from sw.clipboard import auto_paste, clipboard_copy                       # noqa: E402
 from sw.runtime import IS_WINDOWS, log                                    # noqa: E402
 from sw.transcriber import Transcriber                                    # noqa: E402
 from sw.ui.overlay import Overlay                                         # noqa: E402
 from sw.ui.picker import PresetPicker                                     # noqa: E402
+from sw.ui.execution import ExecutionDialog
 from sw.ui.settings import SettingsDialog                                 # noqa: E402
 
 if not IS_WINDOWS:
@@ -49,6 +50,7 @@ class Signals(QObject):
     reformulation_started = Signal(str)
     picker_requested = Signal(str)
     transcription_done = Signal(str, bool)
+    execution_done = Signal(object)
     warning = Signal(str)
     error = Signal(str)
     audio_level = Signal(object)
@@ -88,6 +90,7 @@ class SuperWhisper(QObject):
         self._settings_dialog = None
         self._picker = None
         self._pick_armed = False
+        self._execution_dialog = ExecutionDialog()
 
         self.overlay = Overlay()
         self._build_tray()
@@ -129,6 +132,9 @@ class SuperWhisper(QObject):
         settings_action = QAction("Paramètres", self.menu)
         settings_action.triggered.connect(self._open_settings)
         self.menu.addAction(settings_action)
+        execution_action = QAction("Exécutions locales", self.menu)
+        execution_action.triggered.connect(self._open_execution)
+        self.menu.addAction(execution_action)
         self.menu.addSeparator()
 
         format_menu = self.menu.addMenu("Format par défaut")
@@ -188,6 +194,7 @@ class SuperWhisper(QObject):
         self.signals.reformulation_started.connect(self._on_reformulation_started)
         self.signals.picker_requested.connect(self._on_picker_requested)
         self.signals.transcription_done.connect(self._on_transcription_done)
+        self.signals.execution_done.connect(self._execution_dialog.add_execution)
         self.signals.warning.connect(self._on_warning)
         self.signals.error.connect(self._on_error)
         self.signals.audio_level.connect(self.overlay.update_spectrum)
@@ -234,6 +241,9 @@ class SuperWhisper(QObject):
             return
         if presets.mode_backend(self.config, mode) != "ollama":
             return
+        if self.config.get("pipeline") == "langgraph":
+            # Keep warm-up on the same guarded path; no legacy remote/proxy bypass.
+            return
         backends.OllamaBackend.from_config(self.config).warm_up()
 
     def _check_idle(self):
@@ -246,6 +256,11 @@ class SuperWhisper(QObject):
             self.transcriber.unload()
 
     # ─── Réglages ────────────────────────────────────────────────────────────
+
+    def _open_execution(self):
+        self._execution_dialog.show()
+        self._execution_dialog.raise_()
+        self._execution_dialog.activateWindow()
 
     def _open_settings(self):
         # Non-réentrant : le menu, le double-clic et SIGUSR1 peuvent tous appeler cette méthode
@@ -399,40 +414,19 @@ class SuperWhisper(QObject):
                          args=(text, mode, language, True), daemon=True).start()
 
     def _reformat_and_finish(self, text, mode, target_language, from_picker):
-        system_prompt = presets.resolve(self.config, mode, target_language)
-        if not system_prompt:
-            self.signals.transcription_done.emit(text, from_picker)
-            return
-
-        effective_mode = presets.resolve_effective_mode(mode, target_language)
-        effective_language = presets.effective_language(effective_mode, target_language)
-        backend_name = presets.mode_backend(self.config, effective_mode)
-        backend = backends.build_backend(self.config, backend_name)
-
-        # Le texte brut est copié d'abord : si la reformulation échoue, rien n'est perdu.
-        clipboard_copy(text)
-
-        label = presets.mode_label(self.config, effective_mode)
-        if backend_name == "ollama":
-            label = f"{label} · {self.config.get('ollama_model', '')}"
-        self.signals.reformulation_started.emit(label)
-
-        try:
-            result, warning = backends.reformat(backend, text, system_prompt, effective_language)
-        except backends.ReformatError as exc:
-            log(f"reformulation échouée : {exc}")
-            self.is_processing = False
-            self.signals.warning.emit(str(exc))
-            return
-        except Exception as exc:
-            log(f"reformulation : erreur inattendue {exc}")
-            self.is_processing = False
-            self.signals.warning.emit("Reformulation impossible — texte brut collé")
-            return
-
-        self.signals.transcription_done.emit(result, from_picker)
-        if warning:
-            self.signals.warning.emit(warning)
+        # One immutable snapshot per execution; no UI or clipboard effects inside the graph.
+        config = copy.deepcopy(self.config)
+        if presets.resolve(config, mode, target_language):
+            effective_mode = presets.resolve_effective_mode(mode, target_language)
+            label = presets.mode_label(config, effective_mode)
+            if presets.mode_backend(config, effective_mode) == "ollama":
+                label = f"{label} · {config.get('ollama_model', '')}"
+            self.signals.reformulation_started.emit(label)
+        report = pipeline.run_pipeline(config, text, mode, target_language)
+        self.signals.execution_done.emit(report)
+        self.signals.transcription_done.emit(report.output, from_picker)
+        if report.warning:
+            self.signals.warning.emit(report.warning)
 
     # ─── Retours visuels ─────────────────────────────────────────────────────
 

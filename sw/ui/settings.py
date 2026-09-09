@@ -287,6 +287,16 @@ class SettingsDialog(QDialog):
         engine = QGroupBox("Moteur")
         engine_form = QFormLayout(engine)
 
+        self.pipeline_combo = QComboBox()
+        self.pipeline_combo.addItem("Historique (comparaison)", "legacy")
+        self.pipeline_combo.addItem("LangGraph + LangChain", "langgraph")
+        self._select(self.pipeline_combo, self.config.get("pipeline", "legacy"))
+        engine_form.addRow("Pipeline :", self.pipeline_combo)
+        engine_form.addRow("", _hint(
+            "LangGraph : étapes explicites et une seule nouvelle tentative. "
+            "Ollama doit être local. Claude reste une option réseau explicite. "
+            "Menu de la barre système → Exécutions locales pour inspecter le résultat."))
+
         self.backend_combo = QComboBox()
         self.backend_combo.addItem(backends.OllamaBackend.label, "ollama")
         self.backend_combo.addItem(backends.ClaudeCliBackend.label, "claude")
@@ -628,6 +638,7 @@ class SettingsDialog(QDialog):
         self.config["artifact_logprob_threshold"] = self.logprob_spin.value()
         self.config["collapse_repetitions"] = self.collapse_check.isChecked()
 
+        self.config["pipeline"] = self.pipeline_combo.currentData()
         self.config["reformat_backend"] = self.backend_combo.currentData()
         self.config["ollama_host"] = self.host_edit.text().strip()
         # Si Ollama est éteint la combo peut être vide : on garde le modèle précédent plutôt que
