@@ -3,8 +3,8 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout,
-    QInputDialog, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
-    QTabWidget, QVBoxLayout, QWidget,
+    QGridLayout, QInputDialog, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea,
+    QSpinBox, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .. import artifacts, backends, presets, transcriber, vocabulary
@@ -107,10 +107,56 @@ class SettingsDialog(QDialog):
             "Cet onglet affiche uniquement des agrégats conservés sur cet ordinateur. "
             "Les prompts, transcriptions, contenus audio et sorties ne sont pas envoyés par la télémétrie."
         ))
+        self.metric_labels = {}
+        cards = QGridLayout()
+        cards.setSpacing(10)
+        for index, (key, label) in enumerate((
+            ("runs", "Runs"), ("audio_runs", "Audio recordings"),
+            ("compressed_audio_bytes", "Audio storage"), ("input_tokens", "Input tokens"),
+            ("output_tokens", "Output tokens"), ("runs_with_warnings", "Warnings"),
+        )):
+            card = QGroupBox(label)
+            card_layout = QVBoxLayout(card)
+            value = QLabel("—")
+            value.setStyleSheet(f"color: {style.TEXT}; font-size: 20px; font-weight: bold;")
+            value.setAlignment(Qt.AlignCenter)
+            card_layout.addWidget(value)
+            self.metric_labels[key] = value
+            cards.addWidget(card, index // 3, index % 3)
+        layout.addLayout(cards)
+
+        timing_box = QGroupBox("Response times")
+        timing_layout = QGridLayout(timing_box)
+        self.timing_labels = {}
+        for row, (key, label) in enumerate((("transcription_total_ms", "Transcription"),
+                                             ("pipeline_duration_ms", "Pipeline"),
+                                             ("stop_to_result_ms", "End to result"))):
+            timing_layout.addWidget(QLabel(label), row, 0)
+            value = QLabel("—")
+            timing_layout.addWidget(value, row, 1)
+            self.timing_labels[key] = value
+        layout.addWidget(timing_box)
+
+        resource_box = QGroupBox("Device measurements")
+        resource_layout = QVBoxLayout(resource_box)
+        self.resources_label = QLabel("—")
+        self.resources_label.setWordWrap(True)
+        resource_layout.addWidget(self.resources_label)
+        layout.addWidget(resource_box)
+
+        recent_box = QGroupBox("Recent runs")
+        recent_layout = QVBoxLayout(recent_box)
+        self.recent_runs = QTableWidget(0, 3)
+        self.recent_runs.setHorizontalHeaderLabels(["Time", "Pipeline", "Duration"])
+        self.recent_runs.setMaximumHeight(170)
+        recent_layout.addWidget(self.recent_runs)
+        layout.addWidget(recent_box)
+
         self.metrics_summary = QPlainTextEdit()
         self.metrics_summary.setReadOnly(True)
-        self.metrics_summary.setMinimumHeight(360)
-        layout.addWidget(self.metrics_summary, 1)
+        self.metrics_summary.setMaximumHeight(110)
+        self.metrics_summary.setPlaceholderText("Technical details")
+        layout.addWidget(self.metrics_summary)
         refresh = QPushButton("Actualiser les métriques")
         refresh.clicked.connect(self._refresh_metrics)
         layout.addWidget(refresh)
@@ -122,6 +168,27 @@ class SettingsDialog(QDialog):
             stats = HistoryStore().statistics()
         except Exception as exc:
             stats = {"unavailable": str(exc)}
+        def display(key):
+            value = stats.get(key, 0)
+            if key == "compressed_audio_bytes":
+                return f"{value / 1024:.1f} KiB"
+            return f"{value:,}" if isinstance(value, (int, float)) else "—"
+        for key, label in self.metric_labels.items():
+            label.setText(display(key))
+        for key, label in self.timing_labels.items():
+            timing = stats.get(key, {})
+            label.setText("—" if not timing else f"median {timing['median']:.0f} ms · P95 {timing['p95']:.0f} ms")
+        self.resources_label.setText(
+            f"Device samples: {stats.get('device_samples', 0):,}. "
+            "CPU/RAM/GPU/VRAM values are recorded per run when enabled; unavailable hardware stays blank."
+        )
+        reports = HistoryStore().recent(8) if not stats.get("unavailable") else []
+        self.recent_runs.setRowCount(len(reports))
+        for row, report in enumerate(reports):
+            self.recent_runs.setItem(row, 0, QTableWidgetItem(report.created_at.replace("T", " ")[:19]))
+            self.recent_runs.setItem(row, 1, QTableWidgetItem(report.pipeline))
+            duration = report.metrics.get("stop_to_result_ms")
+            self.recent_runs.setItem(row, 2, QTableWidgetItem("—" if duration is None else f"{duration:.0f} ms"))
         self.metrics_summary.setPlainText(format_metrics_summary(stats, self.config))
 
     # ─── Onglet Transcription ────────────────────────────────────────────────

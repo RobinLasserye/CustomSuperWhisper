@@ -127,7 +127,8 @@ class HistoryStore:
         from statistics import median
         timings = {key: [] for key in ('pipeline_duration_ms', 'transcription_total_ms', 'stop_to_result_ms')}
         ratings = Counter()
-        warnings = count = audio_bytes = 0
+        warnings = count = audio_runs = audio_bytes = input_tokens = output_tokens = 0
+        device_samples = 0
         with closing(self._connect()) as db:
             for (payload,) in db.execute('SELECT payload FROM runs'):
                 data = json.loads(payload)
@@ -135,13 +136,21 @@ class HistoryStore:
                 warnings += bool(data.get('warning'))
                 ratings[data.get('review', {}).get('rating', 'unrated')] += 1
                 measurements = data.get('metrics', {})
-                audio_bytes += measurements.get('audio_storage', {}).get('compressed_bytes', 0)
+                audio_storage = measurements.get('audio_storage', {})
+                if audio_storage.get('saved'):
+                    audio_runs += 1
+                audio_bytes += audio_storage.get('compressed_bytes', 0)
+                input_tokens += measurements.get('input_tokens', 0) or 0
+                output_tokens += measurements.get('output_tokens', 0) or 0
+                device_samples += measurements.get('samples', 0) or 0
                 for key, values in timings.items():
                     value = measurements.get(key)
                     if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
                         values.append(value)
         stats = {'runs': count, 'runs_with_warnings': warnings,
                  'manual_ratings': dict(ratings), 'compressed_audio_bytes': audio_bytes,
+                 'audio_runs': audio_runs, 'input_tokens': input_tokens,
+                 'output_tokens': output_tokens, 'device_samples': device_samples,
                  'database_bytes': self.path.stat().st_size}
         for key, values in timings.items():
             if values:
